@@ -1,0 +1,9 @@
+[package]
+name = "domoc"
+version = "0.1.0"
+authors = ["Ayke van Laethem <aykevanlaethem@gmail.com>"]
+
+[dependencies]
+spidev = "0.2.1"
+crc8 = "0.1.1"
+ws = "0.5.3"
