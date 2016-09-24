@@ -1,11 +1,24 @@
 
-extern crate spidev;
 use std::io::prelude::*;
-use spidev::Spidev;
+use std::{env, fs, io, process, thread, time};
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{channel, Sender, Receiver};
+
+extern crate chrono;
+use chrono::*;
+
 extern crate crc8;
 use crc8::*;
 
-use std::{env, io, thread, time};
+extern crate serde_json;
+include!(concat!(env!("OUT_DIR"), "/messages.rs"));
+
+extern crate spidev;
+use spidev::Spidev;
+
+extern crate ws;
+extern crate env_logger;
+
 
 const CMD_TEMP_NOW: u8 = 0x11;
 const CMD_TEMP_AVG: u8 = 0x12;
@@ -15,6 +28,10 @@ const CMD_TEST: u8 = 0x20;
 
 const TYPE_GETTER2: u8 = 0b00000000;
 const TYPE_GETTER4: u8 = 0b01000000;
+
+const LOG_INTERVAL: i64 = 60 * 5; // 5 minutes
+const SERVER_URL: &'static str = "wss://domo.aykevl.nl/api/ws/device";
+const CONFIG_PATH: &'static str = ".config/domo.json";
 
 fn read_number(spi: &mut Spidev, cmd: u8, n: u8) -> Result<u32, io::Error> {
     let rawcmd = match n {
@@ -72,16 +89,166 @@ fn raw_to_celsius(value: u32, bits: u32) -> f64 {
 fn decode_temp(value: u32) -> f64 {
     // Value holds temperature in centidegrees, where 0 equals -55°C.
     // Convert this value to regular °C readings.
-    (value - 5500) as f64 / 100.0
+    ((value as i32 - 5500) as f64) / 100.0
 }
 
-fn mainloop() {
-    // TODO
+fn log(mut spi: &mut Spidev, tx: Option<&Sender<TemperatureLog>>) {
+    let now = Local::now();
+    let result = read_number(&mut spi, CMD_TEMP_AVG, 2).unwrap();
+    let temp = decode_temp(result);
+    println!("{:02}:{:02} {:.2}°C", now.hour(), now.minute(), temp);
+
+    // Send temperature when tx is not None.
+    match tx {
+        Some(tx) => {
+            tx.send(TemperatureLog {
+                    value: temp,
+                    time: now.timestamp(),
+                })
+                .unwrap();
+        }
+        None => {}
+    }
 }
 
+fn socket_on_connect(out: &ws::Sender, config: &Config) {
+    // send 'connect' message
+    let msg_connect = MsgConnect {
+        message: "connect".to_string(),
+        name: config.name.clone(),
+        serial: config.serial.clone(),
+    };
+    let msg_connect_encoded = serde_json::to_string(&msg_connect).unwrap();
+    match out.send(msg_connect_encoded) {
+        Ok(_) => {}
+        Err(err) => {
+            println!("failed to send message: {}", err);
+            process::exit(1);
+        }
+    };
+}
+
+
+fn socket_run(rx: Receiver<TemperatureLog>, config: Config) -> ws::Result<()> {
+    let rx_wrap = Arc::new(Mutex::new(rx));
+    ws::connect(SERVER_URL, |out| {
+        socket_on_connect(&out, &config);
+
+        // Start thread that sends messages received via `rx`
+        let rx_mutex = rx_wrap.clone();
+        thread::spawn(move || {
+            let rx = rx_mutex.lock().unwrap();
+            loop {
+                let msg = rx.recv().unwrap();
+                let msg_log = MsgSensorLog {
+                    message: "sensorLog-dbg".to_string(),
+                    name: "temp".to_string(),
+                    value: msg.value,
+                    time: msg.time,
+                    _type: "temperature".to_string(),
+                    interval: LOG_INTERVAL,
+                };
+                let msg_log_encoded = serde_json::to_string(&msg_log).unwrap();
+                match out.send(msg_log_encoded) {
+                    Ok(_) => {}
+                    Err(err) => {
+                        println!("failed to send message: {}", err);
+                        process::exit(1);
+                    }
+                };
+            }
+        });
+
+        move |msg_encoded| {
+            let msg_text = match msg_encoded {
+                ws::Message::Text(val) => val,
+                ws::Message::Binary(_) => {
+                    println!("received binary message");
+                    process::exit(1);
+                }
+            };
+            let msg: MsgServer = match serde_json::from_str(&msg_text.as_str()) {
+                Ok(msg) => msg,
+                Err(err) => {
+                    println!("got invalid message from server: {}\nmessage: {}",
+                             err,
+                             &msg_text);
+                    process::exit(1);
+                }
+            };
+
+            if msg.message == "time" {
+                let timestamp = UTC::now().timestamp();
+                match msg.value {
+                    Some(value) if (timestamp - value).abs() < 60 => {
+                        println!("verified time (TODO)");
+                    }
+                    Some(_) => {
+                        println!("WARNING: time not in sync");
+                    }
+                    None => {
+                        println!("WARNING: no timestamp sent in time message");
+                    }
+                };
+            } else {
+                println!("Got unknown message: {}", &msg_text);
+            }
+
+            Ok(())
+        }
+    })
+}
+
+struct TemperatureLog {
+    value: f64,
+    time: i64,
+}
+
+// Load configuration (name, serial number) to identify this controller to the server.
+fn load_config() -> Config {
+    let mut path = env::home_dir().expect("could not find home directory");
+    path.push(CONFIG_PATH);
+    // TODO error handling
+    let f: fs::File = fs::File::open(path).expect("could not open config file");
+    serde_json::from_reader(f).expect("could not parse config file")
+}
+
+// Loop endlessly and send sensor data to the server.
+fn mainloop(mut spi: Spidev) {
+    env_logger::init().unwrap();
+
+    let config = load_config();
+
+    let (tx, rx): (Sender<TemperatureLog>, Receiver<TemperatureLog>) = channel();
+
+    thread::spawn(move || {
+        match socket_run(rx, config) {
+            Ok(_) => {}
+            Err(err) => {
+                println!("Could not open server socket: {}", err);
+                process::exit(1);
+            }
+        };
+    });
+
+    println!("       Temperature:");
+    log(&mut spi, None);
+    loop {
+        let timestamp = Local::now().timestamp();
+        let nextlog = timestamp / LOG_INTERVAL * LOG_INTERVAL + LOG_INTERVAL;
+        thread::sleep(time::Duration::from_secs((nextlog - timestamp) as u64));
+        log(&mut spi, Some(&tx));
+    }
+}
 
 fn main() {
-    let mut spi = Spidev::open("/dev/spidev0.0").expect("could not open SPI device");
+    let mut spi = match Spidev::open("/dev/spidev0.0") {
+        Ok(val) => val,
+        Err(val) => {
+            println!("Could not open SPI device: {}", val);
+            process::exit(1);
+        }
+    };
 
     match env::args().nth(1) {
         Some(ref cmd) if cmd == "test2" || cmd == "test" => {
@@ -114,7 +281,7 @@ fn main() {
             println!("unknown command: {}", cmd);
         }
         None => {
-            mainloop();
+            mainloop(spi);
         }
     }
 }
