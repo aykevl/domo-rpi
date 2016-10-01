@@ -92,16 +92,16 @@ fn decode_temp(value: u32) -> f64 {
     ((value as i32 - 5500) as f64) / 100.0
 }
 
-fn log(mut spi: &mut Spidev, tx: Option<&Sender<TemperatureLog>>) {
+fn log(mut spi: &mut Spidev, tx_sensor: Option<&Sender<TemperatureLog>>) {
     let now = Local::now();
     let result = read_number(&mut spi, CMD_TEMP_AVG, 2).unwrap();
     let temp = decode_temp(result);
     println!("{:02}:{:02} {:.2}°C", now.hour(), now.minute(), temp);
 
-    // Send temperature when tx is not None.
-    match tx {
-        Some(tx) => {
-            tx.send(TemperatureLog {
+    // Send temperature when tx_sensor is not None.
+    match tx_sensor {
+        Some(tx_sensor) => {
+            tx_sensor.send(TemperatureLog {
                     value: temp,
                     time: now.timestamp(),
                 })
@@ -111,92 +111,110 @@ fn log(mut spi: &mut Spidev, tx: Option<&Sender<TemperatureLog>>) {
     }
 }
 
-fn socket_on_connect(out: &ws::Sender, config: &Config) {
-    // send 'connect' message
-    let msg_connect = MsgConnect {
-        message: "connect".to_string(),
-        name: config.name.clone(),
-        serial: config.serial.clone(),
-    };
-    let msg_connect_encoded = serde_json::to_string(&msg_connect).unwrap();
-    match out.send(msg_connect_encoded) {
-        Ok(_) => {}
-        Err(err) => {
-            println!("failed to send message: {}", err);
-            process::exit(1);
-        }
-    };
+struct Socket {
+    config: Config,
+    rx_sensor: Arc<Mutex<Receiver<TemperatureLog>>>,
+    verified_time: Arc<Mutex<bool>>,
 }
 
+impl Socket {
+    fn run(&self) -> ws::Result<()> {
+        ws::connect(SERVER_URL, |out| {
+            self.on_connect(&out);
 
-fn socket_run(rx: Receiver<TemperatureLog>, config: Config) -> ws::Result<()> {
-    let rx_wrap = Arc::new(Mutex::new(rx));
-    ws::connect(SERVER_URL, |out| {
-        socket_on_connect(&out, &config);
+            // Start thread that sends messages received via `rx_sensor`
+            let verified_time = self.verified_time.clone();
+            let rx_sensor_mutex = self.rx_sensor.clone();
+            thread::spawn(move || {
+                loop {
+                    let rx_sensor = rx_sensor_mutex.lock().unwrap();
+                    let msg = rx_sensor.recv().unwrap();
 
-        // Start thread that sends messages received via `rx`
-        let rx_mutex = rx_wrap.clone();
-        thread::spawn(move || {
-            let rx = rx_mutex.lock().unwrap();
-            loop {
-                let msg = rx.recv().unwrap();
-                let msg_log = MsgSensorLog {
-                    message: "sensorLog-dbg".to_string(),
-                    name: "temp".to_string(),
-                    value: msg.value,
-                    time: msg.time,
-                    _type: "temperature".to_string(),
-                    interval: LOG_INTERVAL,
-                };
-                let msg_log_encoded = serde_json::to_string(&msg_log).unwrap();
-                match out.send(msg_log_encoded) {
-                    Ok(_) => {}
-                    Err(err) => {
-                        println!("failed to send message: {}", err);
-                        process::exit(1);
+                    if !*verified_time.lock().unwrap() {
+                        println!("Not verified time! I cannot make sure that the time on the \
+                                  server and client is about the same.");
+                        continue;
                     }
-                };
-            }
-        });
 
-        move |msg_encoded| {
-            let msg_text = match msg_encoded {
-                ws::Message::Text(val) => val,
-                ws::Message::Binary(_) => {
-                    println!("received binary message");
-                    process::exit(1);
+                    let msg_log = MsgSensorLog {
+                        message: "sensorLog-dbg".to_string(),
+                        name: "temp".to_string(),
+                        value: msg.value,
+                        time: msg.time,
+                        _type: "temperature".to_string(),
+                        interval: LOG_INTERVAL,
+                    };
+                    let msg_log_encoded = serde_json::to_string(&msg_log).unwrap();
+                    match out.send(msg_log_encoded) {
+                        Ok(_) => {}
+                        Err(err) => {
+                            println!("failed to send message: {}", err);
+                            process::exit(1);
+                        }
+                    };
+                }
+            });
+
+            move |msg_encoded| self.on_message(msg_encoded)
+        })
+    }
+
+    fn on_connect(&self, out: &ws::Sender) {
+        // send 'connect' message
+        let msg_connect = MsgConnect {
+            message: "connect".to_string(),
+            name: self.config.name.clone(),
+            serial: self.config.serial.clone(),
+        };
+        let msg_connect_encoded = serde_json::to_string(&msg_connect).unwrap();
+        match out.send(msg_connect_encoded) {
+            Ok(_) => {}
+            Err(err) => {
+                println!("failed to send message: {}", err);
+                process::exit(1);
+            }
+        };
+    }
+
+    fn on_message(&self, msg_encoded: ws::Message) -> Result<(), ws::Error> {
+        let msg_text = match msg_encoded {
+            ws::Message::Text(val) => val,
+            ws::Message::Binary(_) => {
+                println!("received binary message");
+                process::exit(1);
+            }
+        };
+        let msg: MsgServer = match serde_json::from_str(&msg_text.as_str()) {
+            Ok(msg) => msg,
+            Err(err) => {
+                println!("got invalid message from server: {}\nmessage: {}",
+                         err,
+                         &msg_text);
+                process::exit(1);
+            }
+        };
+
+        if msg.message == "time" {
+            let timestamp = UTC::now().timestamp();
+            match msg.value {
+                Some(value) if (timestamp - value).abs() < 60 => {
+                    let verified_time_mutex = self.verified_time.clone();
+                    let mut verified_time = verified_time_mutex.lock().unwrap();
+                    *verified_time = true;
+                }
+                Some(_) => {
+                    println!("WARNING: time not in sync");
+                }
+                None => {
+                    println!("WARNING: no timestamp sent in time message");
                 }
             };
-            let msg: MsgServer = match serde_json::from_str(&msg_text.as_str()) {
-                Ok(msg) => msg,
-                Err(err) => {
-                    println!("got invalid message from server: {}\nmessage: {}",
-                             err,
-                             &msg_text);
-                    process::exit(1);
-                }
-            };
-
-            if msg.message == "time" {
-                let timestamp = UTC::now().timestamp();
-                match msg.value {
-                    Some(value) if (timestamp - value).abs() < 60 => {
-                        println!("verified time (TODO)");
-                    }
-                    Some(_) => {
-                        println!("WARNING: time not in sync");
-                    }
-                    None => {
-                        println!("WARNING: no timestamp sent in time message");
-                    }
-                };
-            } else {
-                println!("Got unknown message: {}", &msg_text);
-            }
-
-            Ok(())
+        } else {
+            println!("UNKNOWN message: {}", &msg_text);
         }
-    })
+
+        Ok(())
+    }
 }
 
 struct TemperatureLog {
@@ -219,10 +237,15 @@ fn mainloop(mut spi: Spidev) {
 
     let config = load_config();
 
-    let (tx, rx): (Sender<TemperatureLog>, Receiver<TemperatureLog>) = channel();
+    let (tx_sensor, rx_sensor): (Sender<TemperatureLog>, Receiver<TemperatureLog>) = channel();
 
     thread::spawn(move || {
-        match socket_run(rx, config) {
+        let socket = Socket {
+            config: config,
+            rx_sensor: Arc::new(Mutex::new(rx_sensor)),
+            verified_time: Arc::new(Mutex::new(false)),
+        };
+        match socket.run() {
             Ok(_) => {}
             Err(err) => {
                 println!("Could not open server socket: {}", err);
@@ -237,7 +260,7 @@ fn mainloop(mut spi: Spidev) {
         let timestamp = Local::now().timestamp();
         let nextlog = timestamp / LOG_INTERVAL * LOG_INTERVAL + LOG_INTERVAL;
         thread::sleep(time::Duration::from_secs((nextlog - timestamp) as u64));
-        log(&mut spi, Some(&tx));
+        log(&mut spi, Some(&tx_sensor));
     }
 }
 
