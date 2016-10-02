@@ -28,42 +28,75 @@ const CMD_TEST: u8 = 0x20;
 
 const TYPE_GETTER2: u8 = 0b00000000;
 const TYPE_GETTER4: u8 = 0b01000000;
+const TYPE_SETTER2: u8 = 0b10000000;
+const TYPE_SETTER4: u8 = 0b11000000;
 
 const LOG_INTERVAL: i64 = 60 * 5; // 5 minutes
 const SERVER_URL: &'static str = "wss://domo.aykevl.nl/api/ws/device";
 const CONFIG_PATH: &'static str = ".config/domo.json";
 
-fn read_number(spi: &mut Spidev, cmd: u8, n: u8) -> Result<u32, io::Error> {
-    let rawcmd = match n {
+fn read_number(spi: &mut Spidev, cmd: u8, length: u8) -> Result<u32, io::Error> {
+    let rawcmd = match length {
         2 => cmd | TYPE_GETTER2,
         4 => cmd | TYPE_GETTER4,
-        _ => panic!("n > 4 in read_number"),
+        _ => panic!("length is not 2 or 4 in read_number"),
     };
 
     try!(spi.write(&[rawcmd]));
 
-    let mut buf: [u8; 5] = [0; 5];
-    for i in 0..n as usize {
+    let mut buf: [u8; 6] = [0; 6];
+    buf[0] = rawcmd;
+    for i in 0..length as usize + 1 {
         thread::sleep(time::Duration::from_millis(1));
-        try!(spi.read(&mut buf[i..i + 1]));
+        try!(spi.read(&mut buf[i + 1..i + 2]));
     }
 
-    thread::sleep(time::Duration::from_millis(1));
-    try!(spi.read(&mut buf[n as usize..n as usize + 1]));
-    let crc = buf[n as usize];
-    let crc2 = Crc8::create_lsb(0x82).calc(&buf, 2, 0);
-    if crc == crc2 {
+    let crc = buf[length as usize + 1];
+    let crc2 = Crc8::create_msb(0x07).calc(&buf, length as i32 + 1, 0);
+    if crc != crc2 {
+        print!("checksum problem (received {:02x}, calculated {:02x}) for message",
+               crc,
+               crc2);
+        for c in &buf[0 + 1..length as usize + 1] {
+            print!(" {:02x}", c);
+        }
+        println!("");
         return Err(io::Error::new(io::ErrorKind::InvalidData, "CRC check failed"));
     }
 
     let mut result: u32 = 0;
-    for i in 0..n as usize {
+    for i in 0..length as usize {
         result >>= 8;
-        let c = (buf[i] as u32) << ((n - 1) * 8);
+        let c = (buf[i + 1] as u32) << ((length - 1) * 8);
         result += c;
     }
 
     Ok(result)
+}
+
+fn write_number(spi: &mut Spidev, cmd: u8, length: u8, value: u32) -> Result<(), io::Error> {
+    let rawcmd = match length {
+        2 => cmd | TYPE_SETTER2,
+        4 => cmd | TYPE_SETTER4,
+        _ => panic!("length is not 2 or 4 in write_number"),
+    };
+
+    let mut buf: [u8; 6] = [0; 6];
+    buf[0] = rawcmd;
+    let mut value2 = value;
+    for i in 0..length as usize {
+        buf[i + 1] = (value2 % 256) as u8;
+        value2 /= 256;
+    }
+    let crc = Crc8::create_msb(0x07).calc(&buf, length as i32 + 1, 0);
+    buf[length as usize + 1] = crc;
+
+    for i in 0..length as usize + 2 {
+        try!(spi.write(&mut buf[i..i + 1]));
+        thread::sleep(time::Duration::from_millis(1));
+    }
+
+    Ok(())
 }
 
 fn raw_to_celsius(value: u32, bits: u32) -> f64 {
@@ -94,15 +127,26 @@ fn decode_temp(value: u32) -> f64 {
 
 fn log(mut spi: &mut Spidev, tx_sensor: Option<&Sender<TemperatureLog>>) {
     let now = Local::now();
-    let result = read_number(&mut spi, CMD_TEMP_AVG, 2).unwrap();
-    let temp = decode_temp(result);
-    println!("{:02}:{:02} {:.2}°C", now.hour(), now.minute(), temp);
+    let temp = match read_number(&mut spi, CMD_TEMP_AVG, 2) {
+        Ok(result) => Some(decode_temp(result)),
+        Err(err) => {
+            println!("failed to read temperature: {}", err);
+            None
+        }
+    };
+    match temp {
+        Some(temp) => println!("{:02}:{:02} {:.2}°C", now.hour(), now.minute(), temp),
+        None => {
+            println!("{:02}:{:02} <none>", now.hour(), now.minute());
+            return;
+        }
+    };
 
     // Send temperature when tx_sensor is not None.
     match tx_sensor {
         Some(tx_sensor) => {
             tx_sensor.send(TemperatureLog {
-                    value: temp,
+                    value: temp.unwrap(),
                     time: now.timestamp(),
                 })
                 .unwrap();
@@ -267,38 +311,88 @@ fn mainloop(mut spi: Spidev) {
 fn main() {
     let mut spi = match Spidev::open("/dev/spidev0.0") {
         Ok(val) => val,
-        Err(val) => {
-            println!("Could not open SPI device: {}", val);
+        Err(err) => {
+            println!("Could not open SPI device: {}", err);
             process::exit(1);
         }
     };
 
+    // Parse param if it exists
+    let param = match env::args().nth(2) {
+        Some(strval) => {
+            match u32::from_str_radix(strval.as_str(), 16) {
+                Ok(val) => Some(val),
+                Err(err) => {
+                    println!("Could not parse argument \"{}\": {}", strval, err);
+                    process::exit(1);
+                }
+            }
+        }
+        None => None,
+    };
+
     match env::args().nth(1) {
+        Some(ref cmd) if cmd == "resync" => {
+            let mut buf: [u8; 1] = [0; 1];
+            print!("resync:");
+            for _ in 0..6 {
+                match spi.write(&mut buf) {
+                    Ok(_) => {}
+                    Err(err) => {
+                        println!(" error: {}", err);
+                        process::exit(1);
+                    }
+                };
+                print!(" {:02x}", buf[0]);
+                thread::sleep(time::Duration::from_millis(100));
+            }
+            println!("");
+        }
         Some(ref cmd) if cmd == "test2" || cmd == "test" => {
-            let result = read_number(&mut spi, CMD_TEST, 2).unwrap();
-            println!("test 2: {:x}", result);
+            match read_number(&mut spi, CMD_TEST, 2) {
+                Ok(val) => println!("test 2: {:04x}", val),
+                Err(err) => println!("test 2: error: {}", err),
+            };
         }
         Some(ref cmd) if cmd == "test4" => {
-            let result = read_number(&mut spi, CMD_TEST, 4).unwrap();
-            println!("test 4: {:x}", result);
+            match read_number(&mut spi, CMD_TEST, 4) {
+                Ok(val) => println!("test 4: {:08x}", val),
+                Err(err) => println!("test 4: error: {}", err),
+            };
         }
         Some(ref cmd) if cmd == "temp" || cmd == "temp-avg" => {
-            let result = read_number(&mut spi, CMD_TEMP_AVG, 2).unwrap();
-            println!("temp avg: {:.2}°C", decode_temp(result));
+            match read_number(&mut spi, CMD_TEMP_AVG, 2) {
+                Ok(val) => println!("temp avg: {:.2}°C", decode_temp(val)),
+                Err(err) => println!("temp avg: error: {}", err),
+            };
         }
-        Some(ref cmd) if cmd == "temp" || cmd == "temp-now" => {
-            let result = read_number(&mut spi, CMD_TEMP_NOW, 2).unwrap();
-            println!("temp now: {:.2}°C", decode_temp(result));
+        Some(ref cmd) if cmd == "temp-now" => {
+            match read_number(&mut spi, CMD_TEMP_NOW, 2) {
+                Ok(val) => println!("temp now: {:.2}°C", decode_temp(val)),
+                Err(err) => println!("temp now: error: {}", err),
+            };
         }
         Some(ref cmd) if cmd == "temp-raw" => {
-            let result = read_number(&mut spi, CMD_TEMP_RAW, 2).unwrap();
-            println!("temp raw: {} ({:.2}°C)",
-                     result,
-                     raw_to_celsius(result, 10));
+            match read_number(&mut spi, CMD_TEMP_RAW, 2) {
+                Ok(val) => println!("temp raw: {} ({:.2}°C)", val, raw_to_celsius(val, 10)),
+                Err(err) => println!("temp raw: error: {}", err),
+            };
         }
         Some(ref cmd) if cmd == "color" => {
-            let result = read_number(&mut spi, CMD_COLOR, 4).unwrap();
-            println!("color: {:8x}", result);
+            match param {
+                Some(param) => {
+                    match write_number(&mut spi, CMD_COLOR, 4, param) {
+                        Ok(_) => {}
+                        Err(err) => println!("ERROR writing color: {}", err),
+                    };
+                }
+                None => {
+                    match read_number(&mut spi, CMD_COLOR, 4) {
+                        Ok(val) => println!("color: {:08x}", val),
+                        Err(err) => println!("color: error: {}", err),
+                    };
+                }
+            };
         }
         Some(ref cmd) => {
             println!("unknown command: {}", cmd);
