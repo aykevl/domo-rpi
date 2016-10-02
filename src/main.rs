@@ -114,7 +114,7 @@ impl Socket {
                     }
 
                     let msg_log = MsgSensorLog {
-                        message: "sensorLog-dbg".to_string(),
+                        message: "sensorLog".to_string(),
                         name: "temp".to_string(),
                         value: msg.value,
                         time: msg.time,
