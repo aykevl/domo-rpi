@@ -1,6 +1,5 @@
 
-use std::io::prelude::*;
-use std::{env, fs, io, process, thread, time};
+use std::{env, fs, process, thread, time};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Sender, Receiver};
 
@@ -8,16 +7,17 @@ extern crate chrono;
 use chrono::*;
 
 extern crate crc8;
-use crc8::*;
+extern crate spidev;
 
 extern crate serde_json;
 include!(concat!(env!("OUT_DIR"), "/messages.rs"));
 
-extern crate spidev;
-use spidev::Spidev;
 
 extern crate ws;
 extern crate env_logger;
+
+mod peripheral;
+use peripheral::*;
 
 
 const CMD_TEMP_NOW: u8 = 0x11;
@@ -26,78 +26,11 @@ const CMD_TEMP_RAW: u8 = 0x13;
 const CMD_COLOR: u8 = 0x05;
 const CMD_TEST: u8 = 0x20;
 
-const TYPE_GETTER2: u8 = 0b00000000;
-const TYPE_GETTER4: u8 = 0b01000000;
-const TYPE_SETTER2: u8 = 0b10000000;
-const TYPE_SETTER4: u8 = 0b11000000;
-
 const LOG_INTERVAL: i64 = 60 * 5; // 5 minutes
 const SERVER_URL: &'static str = "wss://domo.aykevl.nl/api/ws/device";
 const CONFIG_PATH: &'static str = ".config/domo.json";
+const SPIDEV_PATH: &'static str = "/dev/spidev0.0";
 
-fn read_number(spi: &mut Spidev, cmd: u8, length: u8) -> Result<u32, io::Error> {
-    let rawcmd = match length {
-        2 => cmd | TYPE_GETTER2,
-        4 => cmd | TYPE_GETTER4,
-        _ => panic!("length is not 2 or 4 in read_number"),
-    };
-
-    try!(spi.write(&[rawcmd]));
-
-    let mut buf: [u8; 6] = [0; 6];
-    buf[0] = rawcmd;
-    for i in 0..length as usize + 1 {
-        thread::sleep(time::Duration::from_millis(1));
-        try!(spi.read(&mut buf[i + 1..i + 2]));
-    }
-
-    let crc = buf[length as usize + 1];
-    let crc2 = Crc8::create_msb(0x07).calc(&buf, length as i32 + 1, 0);
-    if crc != crc2 {
-        print!("checksum problem (received {:02x}, calculated {:02x}) for message",
-               crc,
-               crc2);
-        for c in &buf[0 + 1..length as usize + 1] {
-            print!(" {:02x}", c);
-        }
-        println!("");
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "CRC check failed"));
-    }
-
-    let mut result: u32 = 0;
-    for i in 0..length as usize {
-        result >>= 8;
-        let c = (buf[i + 1] as u32) << ((length - 1) * 8);
-        result += c;
-    }
-
-    Ok(result)
-}
-
-fn write_number(spi: &mut Spidev, cmd: u8, length: u8, value: u32) -> Result<(), io::Error> {
-    let rawcmd = match length {
-        2 => cmd | TYPE_SETTER2,
-        4 => cmd | TYPE_SETTER4,
-        _ => panic!("length is not 2 or 4 in write_number"),
-    };
-
-    let mut buf: [u8; 6] = [0; 6];
-    buf[0] = rawcmd;
-    let mut value2 = value;
-    for i in 0..length as usize {
-        buf[i + 1] = (value2 % 256) as u8;
-        value2 /= 256;
-    }
-    let crc = Crc8::create_msb(0x07).calc(&buf, length as i32 + 1, 0);
-    buf[length as usize + 1] = crc;
-
-    for i in 0..length as usize + 2 {
-        try!(spi.write(&mut buf[i..i + 1]));
-        thread::sleep(time::Duration::from_millis(1));
-    }
-
-    Ok(())
-}
 
 fn raw_to_celsius(value: u32, bits: u32) -> f64 {
     // TODO: these three constants should be read from the microcontroller
@@ -125,9 +58,9 @@ fn decode_temp(value: u32) -> f64 {
     ((value as i32 - 5500) as f64) / 100.0
 }
 
-fn log(mut spi: &mut Spidev, tx_sensor: Option<&Sender<TemperatureLog>>) {
+fn log(mut peripheral: &mut Peripheral, tx_sensor: Option<&Sender<TemperatureLog>>) {
     let now = Local::now();
-    let temp = match read_number(&mut spi, CMD_TEMP_AVG, 2) {
+    let temp = match peripheral.read_number(CMD_TEMP_AVG, 2) {
         Ok(result) => Some(decode_temp(result)),
         Err(err) => {
             println!("failed to read temperature: {}", err);
@@ -162,8 +95,8 @@ struct Socket {
 }
 
 impl Socket {
-    fn run(&self) -> ws::Result<()> {
-        ws::connect(SERVER_URL, |out| {
+    fn run(&self, url: &str) -> ws::Result<()> {
+        ws::connect(url, |out| {
             self.on_connect(&out);
 
             // Start thread that sends messages received via `rx_sensor`
@@ -276,7 +209,7 @@ fn load_config() -> Config {
 }
 
 // Loop endlessly and send sensor data to the server.
-fn mainloop(mut spi: Spidev) {
+fn mainloop(mut peripheral: Peripheral) {
     env_logger::init().unwrap();
 
     let config = load_config();
@@ -289,7 +222,7 @@ fn mainloop(mut spi: Spidev) {
             rx_sensor: Arc::new(Mutex::new(rx_sensor)),
             verified_time: Arc::new(Mutex::new(false)),
         };
-        match socket.run() {
+        match socket.run(SERVER_URL) {
             Ok(_) => {}
             Err(err) => {
                 println!("Could not open server socket: {}", err);
@@ -299,18 +232,18 @@ fn mainloop(mut spi: Spidev) {
     });
 
     println!("       Temperature:");
-    log(&mut spi, None);
+    log(&mut peripheral, None);
     loop {
         let timestamp = Local::now().timestamp();
         let nextlog = timestamp / LOG_INTERVAL * LOG_INTERVAL + LOG_INTERVAL;
         thread::sleep(time::Duration::from_secs((nextlog - timestamp) as u64));
-        log(&mut spi, Some(&tx_sensor));
+        log(&mut peripheral, Some(&tx_sensor));
     }
 }
 
 fn main() {
-    let mut spi = match Spidev::open("/dev/spidev0.0") {
-        Ok(val) => val,
+    let mut peripheral = match Peripheral::open(SPIDEV_PATH) {
+        Ok(peripheral) => peripheral,
         Err(err) => {
             println!("Could not open SPI device: {}", err);
             process::exit(1);
@@ -333,47 +266,45 @@ fn main() {
 
     match env::args().nth(1) {
         Some(ref cmd) if cmd == "resync" => {
-            let mut buf: [u8; 1] = [0; 1];
             print!("resync:");
             for _ in 0..6 {
-                match spi.write(&mut buf) {
-                    Ok(_) => {}
+                match peripheral.resync() {
+                    Ok(val) => print!(" {:02}", val),
                     Err(err) => {
                         println!(" error: {}", err);
                         process::exit(1);
-                    }
+                    },
                 };
-                print!(" {:02x}", buf[0]);
                 thread::sleep(time::Duration::from_millis(100));
             }
             println!("");
         }
         Some(ref cmd) if cmd == "test2" || cmd == "test" => {
-            match read_number(&mut spi, CMD_TEST, 2) {
+            match peripheral.read_number(CMD_TEST, 2) {
                 Ok(val) => println!("test 2: {:04x}", val),
                 Err(err) => println!("test 2: error: {}", err),
             };
         }
         Some(ref cmd) if cmd == "test4" => {
-            match read_number(&mut spi, CMD_TEST, 4) {
+            match peripheral.read_number(CMD_TEST, 4) {
                 Ok(val) => println!("test 4: {:08x}", val),
                 Err(err) => println!("test 4: error: {}", err),
             };
         }
         Some(ref cmd) if cmd == "temp" || cmd == "temp-avg" => {
-            match read_number(&mut spi, CMD_TEMP_AVG, 2) {
+            match peripheral.read_number(CMD_TEMP_AVG, 2) {
                 Ok(val) => println!("temp avg: {:.2}°C", decode_temp(val)),
                 Err(err) => println!("temp avg: error: {}", err),
             };
         }
         Some(ref cmd) if cmd == "temp-now" => {
-            match read_number(&mut spi, CMD_TEMP_NOW, 2) {
+            match peripheral.read_number(CMD_TEMP_NOW, 2) {
                 Ok(val) => println!("temp now: {:.2}°C", decode_temp(val)),
                 Err(err) => println!("temp now: error: {}", err),
             };
         }
         Some(ref cmd) if cmd == "temp-raw" => {
-            match read_number(&mut spi, CMD_TEMP_RAW, 2) {
+            match peripheral.read_number(CMD_TEMP_RAW, 2) {
                 Ok(val) => println!("temp raw: {} ({:.2}°C)", val, raw_to_celsius(val, 10)),
                 Err(err) => println!("temp raw: error: {}", err),
             };
@@ -381,13 +312,13 @@ fn main() {
         Some(ref cmd) if cmd == "color" => {
             match param {
                 Some(param) => {
-                    match write_number(&mut spi, CMD_COLOR, 4, param) {
+                    match peripheral.write_number(CMD_COLOR, 4, param) {
                         Ok(_) => {}
                         Err(err) => println!("ERROR writing color: {}", err),
                     };
                 }
                 None => {
-                    match read_number(&mut spi, CMD_COLOR, 4) {
+                    match peripheral.read_number(CMD_COLOR, 4) {
                         Ok(val) => println!("color: {:08x}", val),
                         Err(err) => println!("color: error: {}", err),
                     };
@@ -398,7 +329,7 @@ fn main() {
             println!("unknown command: {}", cmd);
         }
         None => {
-            mainloop(spi);
+            mainloop(peripheral);
         }
     }
 }
