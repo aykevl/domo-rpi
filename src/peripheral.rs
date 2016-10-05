@@ -41,6 +41,7 @@ impl Peripheral {
             _ => panic!("length is not 2 or 4 in read_number"),
         };
 
+        thread::sleep(time::Duration::from_millis(1));
         try!(self.spi.write(&[rawcmd]));
 
         let mut buf: [u8; 6] = [0; 6];
@@ -91,8 +92,8 @@ impl Peripheral {
         buf[length as usize + 1] = crc;
 
         for i in 0..length as usize + 2 {
-            try!(self.spi.write(&mut buf[i..i + 1]));
             thread::sleep(time::Duration::from_millis(1));
+            try!(self.spi.write(&mut buf[i..i + 1]));
         }
 
         Ok(())
