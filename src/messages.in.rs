@@ -23,7 +23,7 @@ struct MsgSensorLog {
     value: f64,
     time: i64,
     #[serde(rename="type")]
-    _type: String,
+    sensor_type: String,
     interval: i64,
 }
 

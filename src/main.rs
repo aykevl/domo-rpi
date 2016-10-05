@@ -118,7 +118,7 @@ impl Socket {
                         name: "temp".to_string(),
                         value: msg.value,
                         time: msg.time,
-                        _type: "temperature".to_string(),
+                        sensor_type: "temperature".to_string(),
                         interval: LOG_INTERVAL,
                     };
                     let msg_log_encoded = serde_json::to_string(&msg_log).unwrap();
