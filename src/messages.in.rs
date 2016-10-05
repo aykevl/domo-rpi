@@ -42,13 +42,13 @@ struct MsgColor {
     is_white: bool,
     #[serde(rename="looping")]
     is_looping: bool,
-    hue: f64,
-    time: f64,
-    saturation: f64,
-    value: f64,
-    red: f64,
-    green: f64,
-    blue: f64,
+    hue: f32,
+    time: f32,
+    saturation: f32,
+    value: f32,
+    red: f32,
+    green: f32,
+    blue: f32,
 }
 
 // these should be const members of the MsgColor impl
@@ -85,16 +85,16 @@ impl MsgColor {
 
         if mode == COLOR_MODE_HSV || mode == COLOR_MODE_HSV_MAX {
             if color.is_looping {
-                color.time = ufloat8::decode(bytes[1]) as f64 / 4.0;
+                color.time = ufloat8::decode(bytes[1]) as f32 / 4.0;
             } else {
-                color.hue = bytes[1] as f64 / 255.0;
+                color.hue = bytes[1] as f32 / 255.0;
             }
-            color.saturation = bytes[2] as f64 / 255.0;
-            color.value = bytes[3] as f64 / 255.0;
+            color.saturation = bytes[2] as f32 / 255.0;
+            color.value = bytes[3] as f32 / 255.0;
         } else {
-            color.red = bytes[1] as f64 / 255.0;
-            color.green = bytes[2] as f64 / 255.0;
-            color.blue = bytes[3] as f64 / 255.0;
+            color.red = bytes[1] as f32 / 255.0;
+            color.green = bytes[2] as f32 / 255.0;
+            color.blue = bytes[3] as f32 / 255.0;
         }
 
         // return the color
