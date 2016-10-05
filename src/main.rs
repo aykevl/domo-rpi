@@ -94,6 +94,35 @@ fn log(peripheral: Arc<Mutex<Peripheral>>, tx_msg_to_server: Option<Arc<Mutex<Se
     }
 }
 
+fn actuator_to_server(peripheral_mutex: Arc<Mutex<Peripheral>>,
+                      tx_msg_to_server: Arc<Mutex<Sender<String>>>) {
+    let mut color_raw = 0;
+    loop {
+        thread::sleep(time::Duration::from_secs(5));
+
+        let color_raw_new = match peripheral_mutex.lock().unwrap().read_number(CMD_COLOR, 4) {
+            Ok(val) => val,
+            Err(err) => {
+                println!("could not read color: {}", err);
+                continue;
+            }
+        };
+        if color_raw_new == color_raw {
+            continue;
+        }
+        color_raw = color_raw_new;
+        let color = Color::from_raw(color_raw);
+        println!("color change from peripheral: {:?}", color);
+        let msg = serde_json::to_string(&MsgColor {
+                message: "actuator".to_string(),
+                name: "color".to_string(),
+                value: color,
+            })
+            .unwrap();
+        tx_msg_to_server.lock().unwrap().send(msg).unwrap();
+    }
+}
+
 struct Socket {
     config: Config,
     rx_msg_to_server: Arc<Mutex<Receiver<String>>>,
@@ -208,6 +237,29 @@ impl Socket {
                     println!("WARNING: no timestamp sent in time message");
                 }
             };
+        } else if msg.message == "actuator" {
+            match msg.name {
+                Some(name) => {
+                    match &name[..] {
+                        "color" => {
+                            match msg.value {
+                                Some(color) => {
+                                    println!("color change from server: {:?}", color);
+                                }
+                                None => {
+                                    println!("WARNING: no timestamp sent in time message");
+                                }
+                            }
+                        }
+                        _ => {
+                            println!("WARNING: unknown actuator: {}", name);
+                        }
+                    }
+                }
+                None => {
+                    println!("WARNING: no name sent with actuator message: {}", &msg_text);
+                }
+            }
         } else {
             println!("UNKNOWN message: {}", &msg_text);
         }
@@ -231,10 +283,19 @@ fn mainloop(peripheral: Peripheral) {
 
     let config = load_config();
 
-    let (tx_msg_to_server, rx_msg_to_server): (Sender<String>, Receiver<String>) = channel();
+    let (tx_msg_to_server_raw, rx_msg_to_server): (Sender<String>, Receiver<String>) = channel();
+    let tx_msg_to_server = Arc::new(Mutex::new(tx_msg_to_server_raw));
+
+    let peripheral_wrap = Arc::new(Mutex::new(peripheral));
 
     thread::spawn(move || {
         Socket::connect(config, SERVER_URL, rx_msg_to_server);
+    });
+
+    let peripheral_mutex = peripheral_wrap.clone();
+    let tx_msg_to_server_clone = tx_msg_to_server.clone();
+    thread::spawn(move || {
+        actuator_to_server(peripheral_mutex, tx_msg_to_server_clone);
     });
 
     println!("       Temperature:");
@@ -325,7 +386,7 @@ fn main() {
                 }
                 None => {
                     match peripheral.read_number(CMD_COLOR, 4) {
-                        Ok(val) => println!("color: {:08x}: {:?}", val, MsgColor::from_raw(val)),
+                        Ok(val) => println!("color: {:08x}: {:?}", val, Color::from_raw(val)),
                         Err(err) => println!("color: error: {}", err),
                     };
                 }

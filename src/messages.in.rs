@@ -3,9 +3,10 @@
 #[derive(Deserialize)]
 struct MsgServer {
     message: String,
+    name: Option<String>,
     timestamp: Option<i64>,
+    value: Option<Color>,
 }
-
 
 // Connect message from client to server
 #[derive(Serialize)]
@@ -34,9 +35,16 @@ struct Config {
     serial: String,
 }
 
+// Send color to server
+#[derive(Serialize)]
+struct MsgColor {
+    message: String,
+    name: String,
+    value: Color,
+}
 
 #[derive(Serialize,Deserialize,Debug,Default)]
-struct MsgColor {
+struct Color {
     mode: String,
     #[serde(rename="isWhite")]
     is_white: bool,
@@ -51,7 +59,7 @@ struct MsgColor {
     blue: f32,
 }
 
-// these should be const members of the MsgColor impl
+// these should be const members of the Color impl
 const COLOR_FLAG_WHITE: u8 = 0b10000000;
 const COLOR_FLAG_LOOPING: u8 = 0b01000000;
 const COLOR_MODE_MASK: u8 = 0b00000011;
@@ -60,8 +68,8 @@ const COLOR_MODE_HSV: u8 = 0b00000001;
 const COLOR_MODE_HSV_MAX: u8 = 0b00000010;
 const COLOR_MODE_UNDEF1: u8 = 0b00000011;
 
-impl MsgColor {
-    fn from_raw(value: u32) -> MsgColor {
+impl Color {
+    fn from_raw(value: u32) -> Color {
         let mut bytes: [u8; 4] = [0; 4];
         let mut raw_value = value;
         for i in 0..4 {
@@ -69,7 +77,7 @@ impl MsgColor {
             raw_value <<= 8;
         }
 
-        let mut color = MsgColor{..Default::default()};
+        let mut color = Color{..Default::default()};
 
         let mode = bytes[0] & COLOR_MODE_MASK;
         color.mode = match mode {
