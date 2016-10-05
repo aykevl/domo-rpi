@@ -59,9 +59,9 @@ fn decode_temp(value: u32) -> f64 {
     ((value as i32 - 5500) as f64) / 100.0
 }
 
-fn log(mut peripheral: &mut Peripheral, tx_sensor: Option<&Sender<TemperatureLog>>) {
+fn log(peripheral: Arc<Mutex<Peripheral>>, tx_msg_to_server: Option<&Sender<String>>) {
     let now = Local::now();
-    let temp = match peripheral.read_number(CMD_TEMP_AVG, 2) {
+    let temp = match peripheral.lock().unwrap().read_number(CMD_TEMP_AVG, 2) {
         Ok(result) => Some(decode_temp(result)),
         Err(err) => {
             println!("failed to read temperature: {}", err);
@@ -77,13 +77,18 @@ fn log(mut peripheral: &mut Peripheral, tx_sensor: Option<&Sender<TemperatureLog
     };
 
     // Send temperature when tx_sensor is not None.
-    match tx_sensor {
-        Some(tx_sensor) => {
-            tx_sensor.send(TemperatureLog {
+    match tx_msg_to_server {
+        Some(tx_msg_to_server) => {
+            let msg = serde_json::to_string(&MsgSensorLog {
+                    message: "sensorLog".to_string(),
+                    name: "temp".to_string(),
                     value: temp.unwrap(),
                     time: now.timestamp(),
+                    sensor_type: "temperature".to_string(),
+                    interval: LOG_INTERVAL,
                 })
                 .unwrap();
+            tx_msg_to_server.send(msg).unwrap();
         }
         None => {}
     }
@@ -91,15 +96,15 @@ fn log(mut peripheral: &mut Peripheral, tx_sensor: Option<&Sender<TemperatureLog
 
 struct Socket {
     config: Config,
-    rx_sensor: Arc<Mutex<Receiver<TemperatureLog>>>,
+    rx_msg_to_server: Arc<Mutex<Receiver<String>>>,
     verified_time: Arc<Mutex<bool>>,
 }
 
 impl Socket {
-    fn new(config: Config, rx_sensor: Receiver<TemperatureLog>) -> Socket {
+    fn new(config: Config, rx_msg_to_server: Receiver<String>) -> Socket {
         Socket {
             config: config,
-            rx_sensor: Arc::new(Mutex::new(rx_sensor)),
+            rx_msg_to_server: Arc::new(Mutex::new(rx_msg_to_server)),
             verified_time: Arc::new(Mutex::new(false)),
         }
     }
@@ -108,13 +113,13 @@ impl Socket {
         ws::connect(url, |out| {
             self.on_connect(&out);
 
-            // Start thread that sends messages received via `rx_sensor`
+            // Start thread that sends messages received via `rx_msg_to_server`
             let verified_time = self.verified_time.clone();
-            let rx_sensor_mutex = self.rx_sensor.clone();
+            let rx_msg_to_server_mutex = self.rx_msg_to_server.clone();
             thread::spawn(move || {
+                let rx_msg_to_server = rx_msg_to_server_mutex.lock().unwrap();
                 loop {
-                    let rx_sensor = rx_sensor_mutex.lock().unwrap();
-                    let msg = rx_sensor.recv().unwrap();
+                    let msg = rx_msg_to_server.recv().unwrap();
 
                     if !*verified_time.lock().unwrap() {
                         println!("Not verified time! I cannot make sure that the time on the \
@@ -122,16 +127,7 @@ impl Socket {
                         continue;
                     }
 
-                    let msg_log = MsgSensorLog {
-                        message: "sensorLog".to_string(),
-                        name: "temp".to_string(),
-                        value: msg.value,
-                        time: msg.time,
-                        sensor_type: "temperature".to_string(),
-                        interval: LOG_INTERVAL,
-                    };
-                    let msg_log_encoded = serde_json::to_string(&msg_log).unwrap();
-                    match out.send(msg_log_encoded) {
+                    match out.send(msg) {
                         Ok(_) => {}
                         Err(err) => {
                             println!("failed to send message: {}", err);
@@ -203,11 +199,6 @@ impl Socket {
     }
 }
 
-struct TemperatureLog {
-    value: f64,
-    time: i64,
-}
-
 // Load configuration (name, serial number) to identify this controller to the server.
 fn load_config() -> Config {
     let mut path = env::home_dir().expect("could not find home directory");
@@ -218,15 +209,15 @@ fn load_config() -> Config {
 }
 
 // Loop endlessly and send sensor data to the server.
-fn mainloop(mut peripheral: Peripheral) {
+fn mainloop(peripheral: Peripheral) {
     env_logger::init().unwrap();
 
     let config = load_config();
 
-    let (tx_sensor, rx_sensor): (Sender<TemperatureLog>, Receiver<TemperatureLog>) = channel();
+    let (tx_msg_to_server, rx_msg_to_server): (Sender<String>, Receiver<String>) = channel();
 
     thread::spawn(move || {
-        match Socket::new(config, rx_sensor).run(SERVER_URL) {
+        match Socket::new(config, rx_msg_to_server).run(SERVER_URL) {
             Ok(_) => {}
             Err(err) => {
                 println!("Could not open server socket: {}", err);
@@ -236,12 +227,12 @@ fn mainloop(mut peripheral: Peripheral) {
     });
 
     println!("       Temperature:");
-    log(&mut peripheral, None);
+    log(peripheral_wrap.clone(), None);
     loop {
         let timestamp = Local::now().timestamp();
         let nextlog = timestamp / LOG_INTERVAL * LOG_INTERVAL + LOG_INTERVAL;
         thread::sleep(time::Duration::from_secs((nextlog - timestamp) as u64));
-        log(&mut peripheral, Some(&tx_sensor));
+        log(peripheral_wrap.clone(), Some(&tx_msg_to_server));
     }
 }
 
