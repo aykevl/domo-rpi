@@ -10,8 +10,9 @@ serde_codegen = "0.8"
 [dependencies]
 chrono = "0.2"
 crc8 = "0.1"
+env_logger = "0.3"
 serde = "0.8"
 serde_json = "0.8"
 spidev = "0.2"
-env_logger = "0.3"
+ufloat8 = "0.1"
 ws = { version = "0.5", features = ["ssl"] }

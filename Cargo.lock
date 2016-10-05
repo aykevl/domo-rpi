@@ -9,6 +9,7 @@ dependencies = [
  "serde_codegen 0.8.10 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_json 0.8.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "spidev 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "ufloat8 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "ws 0.5.3 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -473,6 +474,11 @@ dependencies = [
  "libc 0.2.16 (registry+https://github.com/rust-lang/crates.io-index)",
  "winapi 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
+
+[[package]]
+name = "ufloat8"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "unicode-bidi"

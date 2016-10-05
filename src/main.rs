@@ -8,6 +8,7 @@ use chrono::*;
 
 extern crate crc8;
 extern crate spidev;
+extern crate ufloat8;
 
 extern crate serde_json;
 include!(concat!(env!("OUT_DIR"), "/messages.rs"));
@@ -322,7 +323,7 @@ fn main() {
                 }
                 None => {
                     match peripheral.read_number(CMD_COLOR, 4) {
-                        Ok(val) => println!("color: {:08x}", val),
+                        Ok(val) => println!("color: {:08x}: {:?}", val, MsgColor::from_raw(val)),
                         Err(err) => println!("color: error: {}", err),
                     };
                 }
