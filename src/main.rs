@@ -95,6 +95,14 @@ struct Socket {
 }
 
 impl Socket {
+    fn new(config: Config, rx_sensor: Receiver<TemperatureLog>) -> Socket {
+        Socket {
+            config: config,
+            rx_sensor: Arc::new(Mutex::new(rx_sensor)),
+            verified_time: Arc::new(Mutex::new(false)),
+        }
+    }
+
     fn run(&self, url: &str) -> ws::Result<()> {
         ws::connect(url, |out| {
             self.on_connect(&out);
@@ -217,12 +225,7 @@ fn mainloop(mut peripheral: Peripheral) {
     let (tx_sensor, rx_sensor): (Sender<TemperatureLog>, Receiver<TemperatureLog>) = channel();
 
     thread::spawn(move || {
-        let socket = Socket {
-            config: config,
-            rx_sensor: Arc::new(Mutex::new(rx_sensor)),
-            verified_time: Arc::new(Mutex::new(false)),
-        };
-        match socket.run(SERVER_URL) {
+        match Socket::new(config, rx_sensor).run(SERVER_URL) {
             Ok(_) => {}
             Err(err) => {
                 println!("Could not open server socket: {}", err);
@@ -273,7 +276,7 @@ fn main() {
                     Err(err) => {
                         println!(" error: {}", err);
                         process::exit(1);
-                    },
+                    }
                 };
                 thread::sleep(time::Duration::from_millis(100));
             }
