@@ -181,8 +181,8 @@ impl Socket {
 
         if msg.message == "time" {
             let timestamp = UTC::now().timestamp();
-            match msg.value {
-                Some(value) if (timestamp - value).abs() < 60 => {
+            match msg.timestamp {
+                Some(value) if (value - timestamp).abs() < 60 => {
                     let verified_time_mutex = self.verified_time.clone();
                     let mut verified_time = verified_time_mutex.lock().unwrap();
                     *verified_time = true;

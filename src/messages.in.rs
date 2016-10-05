@@ -3,7 +3,7 @@
 #[derive(Deserialize)]
 struct MsgServer {
     message: String,
-    value: Option<i64>,
+    timestamp: Option<i64>,
 }
 
 
