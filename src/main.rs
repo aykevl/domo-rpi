@@ -59,7 +59,7 @@ fn decode_temp(value: u32) -> f64 {
     ((value as i32 - 5500) as f64) / 100.0
 }
 
-fn log(peripheral: Arc<Mutex<Peripheral>>, tx_msg_to_server: Option<&Sender<String>>) {
+fn log(peripheral: Arc<Mutex<Peripheral>>, tx_msg_to_server: Option<Arc<Mutex<Sender<String>>>>) {
     let now = Local::now();
     let temp = match peripheral.lock().unwrap().read_number(CMD_TEMP_AVG, 2) {
         Ok(result) => Some(decode_temp(result)),
@@ -88,7 +88,7 @@ fn log(peripheral: Arc<Mutex<Peripheral>>, tx_msg_to_server: Option<&Sender<Stri
                     interval: LOG_INTERVAL,
                 })
                 .unwrap();
-            tx_msg_to_server.send(msg).unwrap();
+            tx_msg_to_server.lock().unwrap().send(msg).unwrap();
         }
         None => {}
     }
@@ -101,47 +101,64 @@ struct Socket {
 }
 
 impl Socket {
-    fn new(config: Config, rx_msg_to_server: Receiver<String>) -> Socket {
-        Socket {
+    fn connect(config: Config, url: &str, rx_msg_to_server: Receiver<String>) {
+        let socket = Socket {
             config: config,
             rx_msg_to_server: Arc::new(Mutex::new(rx_msg_to_server)),
             verified_time: Arc::new(Mutex::new(false)),
+        };
+
+        socket.run(url);
+    }
+
+    fn run(&self, url: &str) {
+        let mut delay_seconds = 1;
+        loop {
+            match ws::connect(url, |out| {
+                delay_seconds = 1;
+                self.send_hello(&out);
+
+                // Start thread that sends messages received via `rx_msg_to_server`
+                let verified_time = self.verified_time.clone();
+                let rx_msg_to_server_mutex = self.rx_msg_to_server.clone();
+                thread::spawn(move || {
+                    let rx_msg_to_server = rx_msg_to_server_mutex.lock().unwrap();
+                    loop {
+                        let msg = rx_msg_to_server.recv().unwrap();
+
+                        if !*verified_time.lock().unwrap() {
+                            println!("Not verified time! I cannot make sure that the time on the \
+                                      server and client is about the same.");
+                            continue;
+                        }
+
+                        match out.send(msg) {
+                            Ok(_) => {}
+                            Err(err) => {
+                                // TODO: this drops a message. Don't do that.
+                                println!("failed to send message, exiting thread: {}", err);
+                                return;
+                            }
+                        };
+                    }
+                });
+
+                move |msg_encoded| self.on_message(msg_encoded)
+            }) {
+                Ok(_) => {}
+                Err(err) => {
+                    delay_seconds = std::cmp::min(60, delay_seconds * 2);
+                    println!("Could not open server socket (retrying in {}s): {}",
+                             delay_seconds,
+                             err);
+                }
+            };
+            thread::sleep(time::Duration::from_secs(delay_seconds));
+            println!("Reconnecting...");
         }
     }
 
-    fn run(&self, url: &str) -> ws::Result<()> {
-        ws::connect(url, |out| {
-            self.on_connect(&out);
-
-            // Start thread that sends messages received via `rx_msg_to_server`
-            let verified_time = self.verified_time.clone();
-            let rx_msg_to_server_mutex = self.rx_msg_to_server.clone();
-            thread::spawn(move || {
-                let rx_msg_to_server = rx_msg_to_server_mutex.lock().unwrap();
-                loop {
-                    let msg = rx_msg_to_server.recv().unwrap();
-
-                    if !*verified_time.lock().unwrap() {
-                        println!("Not verified time! I cannot make sure that the time on the \
-                                  server and client is about the same.");
-                        continue;
-                    }
-
-                    match out.send(msg) {
-                        Ok(_) => {}
-                        Err(err) => {
-                            println!("failed to send message: {}", err);
-                            process::exit(1);
-                        }
-                    };
-                }
-            });
-
-            move |msg_encoded| self.on_message(msg_encoded)
-        })
-    }
-
-    fn on_connect(&self, out: &ws::Sender) {
+    fn send_hello(&self, out: &ws::Sender) {
         // send 'connect' message
         let msg_connect = MsgConnect {
             message: "connect".to_string(),
@@ -172,7 +189,7 @@ impl Socket {
                 println!("got invalid message from server: {}\nmessage: {}",
                          err,
                          &msg_text);
-                process::exit(1);
+                return Ok(());
             }
         };
 
@@ -217,13 +234,7 @@ fn mainloop(peripheral: Peripheral) {
     let (tx_msg_to_server, rx_msg_to_server): (Sender<String>, Receiver<String>) = channel();
 
     thread::spawn(move || {
-        match Socket::new(config, rx_msg_to_server).run(SERVER_URL) {
-            Ok(_) => {}
-            Err(err) => {
-                println!("Could not open server socket: {}", err);
-                process::exit(1);
-            }
-        };
+        Socket::connect(config, SERVER_URL, rx_msg_to_server);
     });
 
     println!("       Temperature:");
@@ -232,7 +243,7 @@ fn mainloop(peripheral: Peripheral) {
         let timestamp = Local::now().timestamp();
         let nextlog = timestamp / LOG_INTERVAL * LOG_INTERVAL + LOG_INTERVAL;
         thread::sleep(time::Duration::from_secs((nextlog - timestamp) as u64));
-        log(peripheral_wrap.clone(), Some(&tx_msg_to_server));
+        log(peripheral_wrap.clone(), Some(tx_msg_to_server.clone()));
     }
 }
 

@@ -35,7 +35,7 @@ struct Config {
 }
 
 
-#[derive(Deserialize,Debug,Default)]
+#[derive(Serialize,Deserialize,Debug,Default)]
 struct MsgColor {
     mode: String,
     #[serde(rename="isWhite")]
