@@ -1,6 +1,6 @@
 
 // Message received from server
-#[derive(Deserialize)]
+#[derive(Deserialize,Debug)]
 pub struct MsgServer {
     pub message: String,
     pub name: Option<String>,

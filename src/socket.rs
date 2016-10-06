@@ -1,7 +1,7 @@
 
 use std::{cmp, process, thread, time};
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Sender, Receiver};
 
 use serde_json;
 use ws;
@@ -12,14 +12,19 @@ use messages::*;
 pub struct Socket {
     config: Config,
     rx_msg_to_server: Arc<Mutex<Receiver<String>>>,
+    tx_msg_from_server: Sender<MsgServer>,
     verified_time: Arc<Mutex<bool>>,
 }
 
 impl Socket {
-    pub fn connect(config: Config, url: &str, rx_msg_to_server: Receiver<String>) {
+    pub fn connect(config: Config,
+                   url: &str,
+                   rx_msg_to_server: Receiver<String>,
+                   tx_msg_from_server: Sender<MsgServer>) {
         let socket = Socket {
             config: config,
             rx_msg_to_server: Arc::new(Mutex::new(rx_msg_to_server)),
+            tx_msg_from_server: tx_msg_from_server,
             verified_time: Arc::new(Mutex::new(false)),
         };
 
@@ -123,31 +128,8 @@ impl Socket {
                     println!("WARNING: no timestamp sent in time message");
                 }
             };
-        } else if msg.message == "actuator" {
-            match msg.name {
-                Some(name) => {
-                    match &name[..] {
-                        "color" => {
-                            match msg.value {
-                                Some(color) => {
-                                    println!("color change from server: {:?}", color);
-                                }
-                                None => {
-                                    println!("WARNING: no timestamp sent in time message");
-                                }
-                            }
-                        }
-                        _ => {
-                            println!("WARNING: unknown actuator: {}", name);
-                        }
-                    }
-                }
-                None => {
-                    println!("WARNING: no name sent with actuator message: {}", &msg_text);
-                }
-            }
         } else {
-            println!("UNKNOWN message: {}", &msg_text);
+            self.tx_msg_from_server.send(msg).unwrap();
         }
 
         Ok(())

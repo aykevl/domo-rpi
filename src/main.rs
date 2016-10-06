@@ -121,6 +121,38 @@ fn actuator_to_server(peripheral_mutex: Arc<Mutex<Peripheral>>,
     }
 }
 
+fn msg_from_server(rx_msg_from_server: Receiver<MsgServer>) {
+    loop {
+        let msg = rx_msg_from_server.recv().unwrap();
+        if msg.message == "actuator" {
+            match msg.name {
+                Some(name) => {
+                    match &name[..] {
+                        "color" => {
+                            match msg.value {
+                                Some(color) => {
+                                    println!("color change from server: {:?}", color);
+                                }
+                                None => {
+                                    println!("WARNING: no timestamp sent in time message");
+                                }
+                            }
+                        }
+                        _ => {
+                            println!("WARNING: unknown actuator: {}", name);
+                        }
+                    }
+                }
+                None => {
+                    println!("WARNING: no name sent with actuator message: {:?}", &msg);
+                }
+            }
+        } else {
+            println!("UNKNOWN message: {:?}", &msg);
+        }
+    }
+}
+
 // Load configuration (name, serial number) to identify this controller to the server.
 fn load_config() -> Config {
     let mut path = env::home_dir().expect("could not find home directory");
@@ -136,19 +168,25 @@ fn mainloop(peripheral: Peripheral) {
 
     let config = load_config();
 
-    let (tx_msg_to_server_raw, rx_msg_to_server): (Sender<String>, Receiver<String>) = channel();
-    let tx_msg_to_server = Arc::new(Mutex::new(tx_msg_to_server_raw));
+    let (tx_msg_from_server, rx_msg_from_server): (Sender<MsgServer>, Receiver<MsgServer>) =
+        channel();
+    let (tx_msg_to_server, rx_msg_to_server): (Sender<String>, Receiver<String>) = channel();
+    let tx_msg_to_server = Arc::new(Mutex::new(tx_msg_to_server));
 
     let peripheral_wrap = Arc::new(Mutex::new(peripheral));
 
     thread::spawn(move || {
-        socket::Socket::connect(config, SERVER_URL, rx_msg_to_server);
+        socket::Socket::connect(config, SERVER_URL, rx_msg_to_server, tx_msg_from_server);
     });
 
     let peripheral_mutex = peripheral_wrap.clone();
     let tx_msg_to_server_clone = tx_msg_to_server.clone();
     thread::spawn(move || {
         actuator_to_server(peripheral_mutex, tx_msg_to_server_clone);
+    });
+
+    thread::spawn(move || {
+        msg_from_server(rx_msg_from_server);
     });
 
     println!("       Temperature:");
