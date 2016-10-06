@@ -1,50 +1,50 @@
 
 // Message received from server
 #[derive(Deserialize)]
-struct MsgServer {
-    message: String,
-    name: Option<String>,
-    timestamp: Option<i64>,
-    value: Option<Color>,
+pub struct MsgServer {
+    pub message: String,
+    pub name: Option<String>,
+    pub timestamp: Option<i64>,
+    pub value: Option<Color>,
 }
 
 // Connect message from client to server
 #[derive(Serialize)]
-struct MsgConnect {
-    message: String,
-    name: String,
-    serial: String,
+pub struct MsgConnect {
+    pub message: String,
+    pub name: String,
+    pub serial: String,
 }
 
 // Send temperature to server
 #[derive(Serialize)]
-struct MsgSensorLog {
-    message: String,
-    name: String,
-    value: f64,
-    time: i64,
+pub struct MsgSensorLog {
+    pub message: String,
+    pub name: String,
+    pub value: f64,
+    pub time: i64,
     #[serde(rename="type")]
-    sensor_type: String,
-    interval: i64,
+    pub sensor_type: String,
+    pub interval: i64,
 }
 
 // Config data
 #[derive(Serialize, Deserialize)]
-struct Config {
-    name: String,
-    serial: String,
+pub struct Config {
+    pub name: String,
+    pub serial: String,
 }
 
 // Send color to server
 #[derive(Serialize)]
-struct MsgColor {
-    message: String,
-    name: String,
-    value: Color,
+pub struct MsgColor {
+    pub message: String,
+    pub name: String,
+    pub value: Color,
 }
 
 #[derive(Serialize,Deserialize,Debug,Default)]
-struct Color {
+pub struct Color {
     mode: String,
     #[serde(rename="isWhite")]
     is_white: bool,
@@ -69,7 +69,7 @@ const COLOR_MODE_HSV_MAX: u8 = 0b00000010;
 const COLOR_MODE_UNDEF1: u8 = 0b00000011;
 
 impl Color {
-    fn from_raw(value: u32) -> Color {
+    pub fn from_raw(value: u32) -> Color {
         let mut bytes: [u8; 4] = [0; 4];
         let mut raw_value = value;
         for i in 0..4 {

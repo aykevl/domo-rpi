@@ -8,17 +8,17 @@ use chrono::*;
 
 extern crate crc8;
 extern crate spidev;
-extern crate ufloat8;
 
 extern crate serde_json;
-include!(concat!(env!("OUT_DIR"), "/messages.rs"));
-
 
 extern crate ws;
 extern crate env_logger;
 
 mod peripheral;
 use peripheral::*;
+
+mod messages;
+use messages::*;
 
 
 const CMD_TEMP_NOW: u8 = 0x11;
