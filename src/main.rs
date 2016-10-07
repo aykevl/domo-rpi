@@ -33,7 +33,7 @@ const COLOR_READ_TIMEOUT: u64 = 5; // 5 seconds
 
 
 fn raw_to_celsius(value: u32, bits: u32) -> f64 {
-    // TODO: these three constants should be read from the microcontroller
+    // TODO: these constants should be read from the microcontroller
     let b_coefficient: f64 = 3950.0;  // β-coefficient
     let t0: f64 = 298.15;  // nominal temperature (25°C)
     let r0: f64 = 10000.0; // 10k at 25°C
