@@ -29,6 +29,7 @@ const LOG_INTERVAL: i64 = 60 * 5; // 5 minutes
 const SERVER_URL: &'static str = "wss://domo.aykevl.nl/api/ws/device";
 const CONFIG_PATH: &'static str = ".config/domo.json";
 const SPIDEV_PATH: &'static str = "/dev/spidev0.0";
+const COLOR_READ_TIMEOUT: u64 = 5; // 5 seconds
 
 
 fn raw_to_celsius(value: u32, bits: u32) -> f64 {
@@ -57,9 +58,14 @@ fn decode_temp(value: u32) -> f64 {
     ((value as i32 - 5500) as f64) / 100.0
 }
 
-fn log(peripheral: Arc<Mutex<Peripheral>>, tx_msg_to_server: Option<Arc<Mutex<Sender<String>>>>) {
+struct Domo {
+    peripheral: Peripheral,
+    color: Color,
+}
+
+fn log(domo: Arc<Mutex<Domo>>, tx_msg_to_server: Option<Arc<Mutex<Sender<String>>>>) {
     let now = Local::now();
-    let temp = match peripheral.lock().unwrap().read_number(CMD_TEMP_AVG, 2) {
+    let temp = match domo.lock().unwrap().peripheral.read_number(CMD_TEMP_AVG, 2) {
         Ok(result) => Some(decode_temp(result)),
         Err(err) => {
             println!("failed to read temperature: {}", err);
@@ -92,59 +98,65 @@ fn log(peripheral: Arc<Mutex<Peripheral>>, tx_msg_to_server: Option<Arc<Mutex<Se
     }
 }
 
-fn actuator_to_server(peripheral_mutex: Arc<Mutex<Peripheral>>,
-                      tx_msg_to_server: Arc<Mutex<Sender<String>>>) {
-    let mut color_raw = 0;
+fn actuator_to_server(domo: Arc<Mutex<Domo>>, tx_msg_to_server: Arc<Mutex<Sender<String>>>) {
     loop {
-        thread::sleep(time::Duration::from_secs(5));
+        thread::sleep(time::Duration::from_secs(COLOR_READ_TIMEOUT));
 
-        let color_raw_new = match peripheral_mutex.lock().unwrap().read_number(CMD_COLOR, 4) {
+        let mut domo = domo.lock().unwrap();
+
+        let color_raw = match domo.peripheral.read_number(CMD_COLOR, 4) {
             Ok(val) => val,
             Err(err) => {
                 println!("could not read color: {}", err);
                 continue;
             }
         };
-        if color_raw_new == color_raw {
+
+        if domo.color.raw() == color_raw {
             continue;
         }
-        color_raw = color_raw_new;
-        let color = Color::from_raw(color_raw);
-        println!("color change from peripheral: {:?}", color);
+        domo.color.update(color_raw);
+
+        println!("color change from peripheral: {:?}", domo.color);
         let msg = serde_json::to_string(&MsgColor {
                 message: "actuator".to_string(),
                 name: "color".to_string(),
-                value: color,
+                value: domo.color.clone(),
             })
             .unwrap();
         tx_msg_to_server.lock().unwrap().send(msg).unwrap();
     }
 }
 
-fn msg_from_server(rx_msg_from_server: Receiver<MsgServer>) {
+fn msg_from_server(domo: Arc<Mutex<Domo>>, rx_msg_from_server: Receiver<MsgServer>) {
     loop {
         let msg = rx_msg_from_server.recv().unwrap();
         if msg.message == "actuator" {
-            match msg.name {
-                Some(name) => {
-                    match &name[..] {
-                        "color" => {
-                            match msg.value {
-                                Some(color) => {
-                                    println!("color change from server: {:?}", color);
-                                }
-                                None => {
-                                    println!("WARNING: no timestamp sent in time message");
-                                }
-                            }
-                        }
-                        _ => {
-                            println!("WARNING: unknown actuator: {}", name);
-                        }
-                    }
+            if msg.name.is_none() {
+                println!("WARNING: no name sent with actuator message: {:?}", &msg);
+                continue;
+            }
+            let name = msg.name.unwrap();
+
+            if msg.value.is_none() {
+                println!("WARNING: no value sent in message");
+                continue;
+            }
+            let value = msg.value.unwrap();
+
+            match &name[..] {
+                "color" => {
+                    println!("color change from server: {:?}", value);
+                    let mut domo = domo.lock().unwrap();
+                    domo.color = value;
+                    let color_raw = domo.color.raw();
+                    match domo.peripheral.write_number(CMD_COLOR, 4, color_raw) {
+                        Ok(_) => {}
+                        Err(err) => println!("ERROR writing color: {}", err),
+                    };
                 }
-                None => {
-                    println!("WARNING: no name sent with actuator message: {:?}", &msg);
+                _ => {
+                    println!("WARNING: unknown actuator: {}", name);
                 }
             }
         } else {
@@ -173,29 +185,33 @@ fn mainloop(peripheral: Peripheral) {
     let (tx_msg_to_server, rx_msg_to_server): (Sender<String>, Receiver<String>) = channel();
     let tx_msg_to_server = Arc::new(Mutex::new(tx_msg_to_server));
 
-    let peripheral_wrap = Arc::new(Mutex::new(peripheral));
-
     thread::spawn(move || {
         socket::Socket::connect(config, SERVER_URL, rx_msg_to_server, tx_msg_from_server);
     });
 
-    let peripheral_mutex = peripheral_wrap.clone();
+    let domo = Arc::new(Mutex::new(Domo {
+        peripheral: peripheral,
+        color: Color::new(),
+    }));
+
     let tx_msg_to_server_clone = tx_msg_to_server.clone();
+    let domo_clone = domo.clone();
     thread::spawn(move || {
-        actuator_to_server(peripheral_mutex, tx_msg_to_server_clone);
+        actuator_to_server(domo_clone, tx_msg_to_server_clone);
     });
 
+    let domo_clone = domo.clone();
     thread::spawn(move || {
-        msg_from_server(rx_msg_from_server);
+        msg_from_server(domo_clone, rx_msg_from_server);
     });
 
     println!("       Temperature:");
-    log(peripheral_wrap.clone(), None);
+    log(domo.clone(), None);
     loop {
         let timestamp = Local::now().timestamp();
         let nextlog = timestamp / LOG_INTERVAL * LOG_INTERVAL + LOG_INTERVAL;
         thread::sleep(time::Duration::from_secs((nextlog - timestamp) as u64));
-        log(peripheral_wrap.clone(), Some(tx_msg_to_server.clone()));
+        log(domo.clone(), Some(tx_msg_to_server.clone()));
     }
 }
 

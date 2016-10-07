@@ -43,7 +43,7 @@ pub struct MsgColor {
     pub value: Color,
 }
 
-#[derive(Serialize,Deserialize,Debug,Default)]
+#[derive(Serialize,Deserialize,Debug,Default,Clone)]
 pub struct Color {
     mode: String,
     #[serde(rename="isWhite")]
@@ -69,7 +69,19 @@ const COLOR_MODE_HSV_MAX: u8 = 0b00000010;
 const COLOR_MODE_UNDEF1: u8 = 0b00000011;
 
 impl Color {
-    pub fn from_raw(value: u32) -> Color {
+    pub fn new() -> Self {
+        Color{..Default::default()}
+    }
+
+    pub fn from_raw(value: u32) -> Self {
+        let mut color = Color::new();
+        color.update(value);
+
+        // Return the color
+        color
+    }
+
+    pub fn update(&mut self, value: u32) {
         let mut bytes: [u8; 4] = [0; 4];
         let mut raw_value = value;
         for i in 0..4 {
@@ -77,10 +89,8 @@ impl Color {
             raw_value <<= 8;
         }
 
-        let mut color = Color{..Default::default()};
-
         let mode = bytes[0] & COLOR_MODE_MASK;
-        color.mode = match mode {
+        self.mode = match mode {
             COLOR_MODE_RGB => "rgb",
             COLOR_MODE_HSV => "hsv",
             COLOR_MODE_HSV_MAX => "hsv-max",
@@ -88,24 +98,65 @@ impl Color {
             _ => panic!("unreachable"),
         }.to_string();
 
-        color.is_white = (mode & COLOR_FLAG_WHITE) != 0;
-        color.is_looping = (mode & COLOR_FLAG_LOOPING) != 0;
+        self.is_white = (bytes[0] & COLOR_FLAG_WHITE) != 0;
+        self.is_looping = (bytes[0] & COLOR_FLAG_LOOPING) != 0;
 
-        if mode == COLOR_MODE_HSV || mode == COLOR_MODE_HSV_MAX {
-            if color.is_looping {
-                color.time = ufloat8::decode(bytes[1]) as f32 / 4.0;
+        if mode == COLOR_MODE_RGB {
+            self.red = bytes[1] as f32 / 255.0;
+            self.green = bytes[2] as f32 / 255.0;
+            self.blue = bytes[3] as f32 / 255.0;
+        } else if mode == COLOR_MODE_HSV || mode == COLOR_MODE_HSV_MAX {
+            if self.is_looping {
+                self.time = ufloat8::decode(bytes[1]) as f32 / 4.0;
             } else {
-                color.hue = bytes[1] as f32 / 255.0;
+                self.hue = bytes[1] as f32 / 255.0;
             }
-            color.saturation = bytes[2] as f32 / 255.0;
-            color.value = bytes[3] as f32 / 255.0;
+            self.saturation = bytes[2] as f32 / 255.0;
+            self.value = bytes[3] as f32 / 255.0;
         } else {
-            color.red = bytes[1] as f32 / 255.0;
-            color.green = bytes[2] as f32 / 255.0;
-            color.blue = bytes[3] as f32 / 255.0;
+            // Unknown mode, we can't know what those bits mean.
+        }
+    }
+
+    pub fn raw(&self) -> u32 {
+        let mut bytes: [u8; 4] = [0; 4];
+
+        bytes[0] = match self.mode.as_str() {
+            "rgb" => COLOR_MODE_RGB,
+            "hsv" => COLOR_MODE_HSV,
+            "hsv-max" => COLOR_MODE_HSV_MAX,
+            _ => COLOR_MODE_UNDEF1,
+        };
+        if self.is_white {
+            bytes[0] |= COLOR_FLAG_WHITE;
+        }
+        if self.is_looping {
+            bytes[0] |= COLOR_FLAG_LOOPING;
         }
 
-        // return the color
-        color
+        if self.mode == "rgb" {
+            bytes[1] = (self.red * 255.0).round() as u8;
+            bytes[2] = (self.green * 255.0).round() as u8;
+            bytes[3] = (self.blue * 255.0).round() as u8;
+        } else if self.mode == "hsv" || self.mode == "hsv-max" {
+            if self.is_looping {
+                bytes[1] = ufloat8::encode((self.time*4.0).round() as u32);
+            } else {
+                bytes[1] = (self.hue * 255.0).round() as u8;
+            }
+
+            bytes[2] = (self.saturation * 255.0).round() as u8;
+            bytes[3] = (self.value * 255.0).round() as u8;
+        } else {
+            // Unknown mode, we can't know what those bytes should contain.
+        }
+
+        let mut raw: u32 = 0;
+        for i in 0..4 {
+            raw = (raw << 8) | bytes[i] as u32;
+        }
+
+        // return the raw value
+        raw
     }
 }
