@@ -2,7 +2,7 @@
 use std::io::prelude::*;
 use std::{io, thread, time};
 
-use spidev::Spidev;
+use spidev::{Spidev, SpidevTransfer};
 
 use crc8::Crc8;
 
@@ -12,6 +12,11 @@ const TYPE_GETTER4: u8 = 0b01000000;
 const TYPE_SETTER2: u8 = 0b10000000;
 const TYPE_SETTER4: u8 = 0b11000000;
 
+pub const CMD_TEMP_NOW: u8 = 0x11;
+pub const CMD_TEMP_AVG: u8 = 0x12;
+pub const CMD_TEMP_RAW: u8 = 0x13;
+pub const CMD_COLOR: u8 = 0x05;
+pub const CMD_TEST: u8 = 0x20;
 
 pub struct Peripheral {
     spi: Spidev,
@@ -26,11 +31,37 @@ impl Peripheral {
         })
     }
 
-    pub fn resync(&mut self) -> Result<u8, io::Error> {
-        let mut buf: [u8; 1] = [0; 1];
-        match self.spi.write(&mut buf) {
-            Ok(_) => Ok(buf[0]),
-            Err(err) => Err(err),
+    pub fn resync(&mut self) -> Result<(), io::Error> {
+        let cmd = TYPE_GETTER2 | CMD_TEST;
+        try!(self.spi.write(&[cmd]));
+
+        // read until start-of-command
+        loop {
+            thread::sleep(time::Duration::from_millis(1));
+            let mut transfer = SpidevTransfer::write(&[cmd]);
+            try!(self.spi.transfer(&mut transfer));
+            // start of command
+            if transfer.rx_buf.unwrap()[0] == 0xff {
+                break;
+            }
+        }
+
+        // read rest of command
+        let mut buf: [u8; 3] = [0; 3];
+        for i in 0..3 as usize {
+            thread::sleep(time::Duration::from_millis(1));
+            try!(self.spi.read(&mut buf[i..i + 1]));
+        }
+
+        // is this the correct response?
+        if &buf[..] == [0xcd, 0xab, 0x1f] {
+            Ok(())
+        } else {
+            let err_str = format!("expected cdab1f in resync, got {:02x}{:02x}{:02x}",
+                                  buf[0],
+                                  buf[1],
+                                  buf[2]);
+            Err(io::Error::new(io::ErrorKind::InvalidData, err_str))
         }
     }
 

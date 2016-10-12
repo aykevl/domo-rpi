@@ -19,12 +19,6 @@ use messages::*;
 use chrono::*;
 
 
-const CMD_TEMP_NOW: u8 = 0x11;
-const CMD_TEMP_AVG: u8 = 0x12;
-const CMD_TEMP_RAW: u8 = 0x13;
-const CMD_COLOR: u8 = 0x05;
-const CMD_TEST: u8 = 0x20;
-
 const LOG_INTERVAL: i64 = 60 * 5; // 5 minutes
 const SERVER_URL: &'static str = "wss://domo.aykevl.nl/api/ws/device";
 const CONFIG_PATH: &'static str = ".config/domo.json";
@@ -242,18 +236,14 @@ fn main() {
 
     match env::args().nth(1) {
         Some(ref cmd) if cmd == "resync" => {
-            print!("resync:");
-            for _ in 0..6 {
-                match peripheral.resync() {
-                    Ok(val) => print!(" {:02}", val),
-                    Err(err) => {
-                        println!(" error: {}", err);
-                        process::exit(1);
-                    }
-                };
-                thread::sleep(time::Duration::from_millis(100));
-            }
-            println!("");
+            print!("resync: ");
+            match peripheral.resync() {
+                Ok(_) => println!("done"),
+                Err(err) => {
+                    println!(" error: {}", err);
+                    process::exit(1);
+                }
+            };
         }
         Some(ref cmd) if cmd == "test2" || cmd == "test" => {
             match peripheral.read_number(CMD_TEST, 2) {
