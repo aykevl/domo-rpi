@@ -44,6 +44,14 @@ impl Peripheral {
         thread::sleep(time::Duration::from_millis(1));
         try!(self.spi.write(&[rawcmd]));
 
+        let mut buf: [u8; 1] = [0; 1];
+        thread::sleep(time::Duration::from_millis(1));
+        try!(self.spi.read(&mut buf));
+        if buf[0] != 0xff {
+            let err_string = format!("expected 0xff from SPI, got {}", buf[0]);
+            return Err(io::Error::new(io::ErrorKind::InvalidData, err_string));
+        }
+
         let mut buf: [u8; 6] = [0; 6];
         buf[0] = rawcmd;
         for i in 0..length as usize + 1 {
@@ -93,7 +101,7 @@ impl Peripheral {
 
         for i in 0..length as usize + 2 {
             thread::sleep(time::Duration::from_millis(1));
-            try!(self.spi.write(&mut buf[i..i + 1]));
+            try!(self.spi.write(&buf[i..i + 1]));
         }
 
         Ok(())
