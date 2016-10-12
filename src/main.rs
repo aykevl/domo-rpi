@@ -33,16 +33,18 @@ const COLOR_READ_TIMEOUT: u64 = 5; // 5 seconds
 
 
 fn raw_to_celsius(value: u32, bits: u32) -> f64 {
+    // Source: https://learn.adafruit.com/thermistor/using-a-thermistor
     // TODO: these constants should be read from the microcontroller
     let b_coefficient: f64 = 3950.0;  // β-coefficient
     let t0: f64 = 298.15;  // nominal temperature (25°C)
-    let r0: f64 = 10000.0; // 10k at 25°C
+    let r0: f64 = 10000.0; // 10kΩ at 25°C
+    let series_resistor: f64 = 10000.0; // 10kΩ series resistor
 
     // convert value to range 0..1, where 0.5 means t=t0
     let fvalue: f64 = value as f64 / (1 << bits) as f64;
 
     // calculate resistance for NTC
-    let r = r0 / (1.0 / fvalue - 1.0);
+    let r = series_resistor / (1.0 / fvalue - 1.0);
 
     // Steinhart-Hart equation
     let tinv = (1.0 / t0) + 1.0 / b_coefficient * (r / r0).ln();
