@@ -99,34 +99,43 @@ impl Domo {
     }
 
     fn get_temp_b_coefficient(&mut self) -> Result<f64, io::Error> {
-        Ok(match self.temp_b_coefficient {
+        Ok(match self.config.temp_b_coefficient {
             Some(val) => val,
-            None => {
-                let b_coefficient = try!(self.peripheral.read_number(CMD_TEMP_BCOE, 2)) as f64;
-                self.temp_b_coefficient = Some(b_coefficient);
-                b_coefficient // return
+            None => match self.temp_b_coefficient {
+                Some(val) => val,
+                None => {
+                    let b_coefficient = try!(self.peripheral.read_number(CMD_TEMP_BCOE, 2)) as f64;
+                    self.temp_b_coefficient = Some(b_coefficient);
+                    b_coefficient // return
+                }
             }
         })
     }
 
     fn get_temp_nominal_r(&mut self) -> Result<f64, io::Error> {
-        Ok(match self.temp_nominal_r {
+        Ok(match self.config.temp_nominal_r {
             Some(val) => val,
-            None => {
-                let nominal_r = try!(self.peripheral.read_number(CMD_TEMP_NRES, 2)) as f64;
-                self.temp_nominal_r = Some(nominal_r);
-                nominal_r // return
+            None => match self.temp_nominal_r {
+                Some(val) => val,
+                None => {
+                    let nominal_r = try!(self.peripheral.read_number(CMD_TEMP_NRES, 2)) as f64;
+                    self.temp_nominal_r = Some(nominal_r);
+                    nominal_r // return
+                }
             }
         })
     }
 
     fn get_temp_series_resistor(&mut self) -> Result<f64, io::Error> {
-        Ok(match self.temp_series_resistor {
+        Ok(match self.config.temp_nominal_r {
             Some(val) => val,
-            None => {
-                let series_resistor = try!(self.peripheral.read_number(CMD_TEMP_SRES, 2)) as f64;
-                self.temp_nominal_r = Some(series_resistor);
-                series_resistor // return
+            None => match self.temp_series_resistor {
+                Some(val) => val,
+                None => {
+                    let series_resistor = try!(self.peripheral.read_number(CMD_TEMP_SRES, 2)) as f64;
+                    self.temp_nominal_r = Some(series_resistor);
+                    series_resistor // return
+                }
             }
         })
     }

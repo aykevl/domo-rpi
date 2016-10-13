@@ -33,7 +33,7 @@ pub struct MsgSensorLog {
 pub struct Config {
     pub name: String,
     pub serial: String,
-    pub temp_b_coefficent: Option<f64>,
+    pub temp_b_coefficient: Option<f64>,
     pub temp_nominal_r: Option<f64>,
     pub temp_series_resistor: Option<f64>,
 }
