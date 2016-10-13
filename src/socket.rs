@@ -10,19 +10,22 @@ use chrono::*;
 use messages::*;
 
 pub struct Socket {
-    config: Config,
+    name: String,
+    serial: String,
     rx_msg_to_server: Arc<Mutex<Receiver<String>>>,
     tx_msg_from_server: Sender<MsgServer>,
     verified_time: Arc<Mutex<bool>>,
 }
 
 impl Socket {
-    pub fn connect(config: Config,
-                   url: &str,
+    pub fn connect(url: &str,
+                   name: String,
+                   serial: String,
                    rx_msg_to_server: Receiver<String>,
                    tx_msg_from_server: Sender<MsgServer>) {
         let socket = Socket {
-            config: config,
+            name: name,
+            serial: serial,
             rx_msg_to_server: Arc::new(Mutex::new(rx_msg_to_server)),
             tx_msg_from_server: tx_msg_from_server,
             verified_time: Arc::new(Mutex::new(false)),
@@ -82,8 +85,8 @@ impl Socket {
         // send 'connect' message
         let msg_connect = MsgConnect {
             message: "connect".to_string(),
-            name: self.config.name.clone(),
-            serial: self.config.serial.clone(),
+            name: self.name.clone(),
+            serial: self.serial.clone(),
         };
         let msg_connect_encoded = serde_json::to_string(&msg_connect).unwrap();
         match out.send(msg_connect_encoded) {

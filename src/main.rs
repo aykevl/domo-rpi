@@ -33,6 +33,7 @@ fn decode_temp(value: u32) -> f64 {
 }
 
 struct Domo {
+    config: Config,
     peripheral: Peripheral,
     color: Color,
     temp_b_coefficient: Option<f64>,
@@ -41,14 +42,50 @@ struct Domo {
 }
 
 impl Domo {
-    fn new(peripheral: Peripheral) -> Self {
-        Domo {
+    fn new(spidev_path: &str) -> Result<Self, io::Error> {
+        let peripheral = match Peripheral::open(spidev_path) {
+            Ok(peripheral) => peripheral,
+            Err(err) => {
+                println!("Could not open SPI device: {}", err);
+                process::exit(1);
+            }
+        };
+
+        // Load configuration (name, serial number) to identify this controller to the server.
+        // TODO error handling
+        let mut path = env::home_dir().expect("could not find home directory");
+        path.push(CONFIG_PATH);
+        let f: fs::File = fs::File::open(path).expect("could not open config file");
+        let config = serde_json::from_reader(f).expect("could not parse config file");
+
+        Ok(Domo {
+            config: config,
             peripheral: peripheral,
             color: Color::new(),
             temp_b_coefficient: None,
             temp_nominal_r: None,
             temp_series_resistor: None,
-        }
+        })
+    }
+
+    fn get_name(&self) -> String {
+        return self.config.name.clone();
+    }
+
+    fn get_serial(&self) -> String {
+        return self.config.serial.clone();
+    }
+
+    fn resync(&mut self) -> Result<(), io::Error> {
+        self.peripheral.resync()
+    }
+
+    fn read_number(&mut self, cmd: u8, length: u8) -> Result<u32, io::Error> {
+        self.peripheral.read_number(cmd, length)
+    }
+
+    fn write_number(&mut self, cmd: u8, length: u8, value: u32) -> Result<(), io::Error> {
+        self.peripheral.write_number(cmd, length, value)
     }
 
     fn read_temp_raw(&mut self) -> Result<f64, io::Error> {
@@ -219,31 +256,23 @@ fn msg_from_server(domo: Arc<Mutex<Domo>>, rx_msg_from_server: Receiver<MsgServe
     }
 }
 
-// Load configuration (name, serial number) to identify this controller to the server.
-fn load_config() -> Config {
-    let mut path = env::home_dir().expect("could not find home directory");
-    path.push(CONFIG_PATH);
-    // TODO error handling
-    let f: fs::File = fs::File::open(path).expect("could not open config file");
-    serde_json::from_reader(f).expect("could not parse config file")
-}
-
 // Loop endlessly and send sensor data to the server.
-fn mainloop(peripheral: Peripheral) {
+fn mainloop(domo: Domo) {
     env_logger::init().unwrap();
-
-    let config = load_config();
 
     let (tx_msg_from_server, rx_msg_from_server): (Sender<MsgServer>, Receiver<MsgServer>) =
         channel();
     let (tx_msg_to_server, rx_msg_to_server): (Sender<String>, Receiver<String>) = channel();
     let tx_msg_to_server = Arc::new(Mutex::new(tx_msg_to_server));
 
+    let name = domo.get_name();
+    let serial = domo.get_serial();
     thread::spawn(move || {
-        socket::Socket::connect(config, SERVER_URL, rx_msg_to_server, tx_msg_from_server);
+        socket::Socket::connect(SERVER_URL, name, serial, rx_msg_to_server, tx_msg_from_server);
     });
 
-    let domo = Arc::new(Mutex::new(Domo::new(peripheral)));
+    // enable locking
+    let domo = Arc::new(Mutex::new(domo));
 
     let tx_msg_to_server_clone = tx_msg_to_server.clone();
     let domo_clone = domo.clone();
@@ -267,10 +296,10 @@ fn mainloop(peripheral: Peripheral) {
 }
 
 fn main() {
-    let mut peripheral = match Peripheral::open(SPIDEV_PATH) {
-        Ok(peripheral) => peripheral,
+    let mut domo = match Domo::new(SPIDEV_PATH) {
+        Ok(val) => val,
         Err(err) => {
-            println!("Could not open SPI device: {}", err);
+            println!("error: {}", err);
             process::exit(1);
         }
     };
@@ -292,7 +321,7 @@ fn main() {
     match env::args().nth(1) {
         Some(ref cmd) if cmd == "resync" => {
             print!("resync: ");
-            match peripheral.resync() {
+            match domo.resync() {
                 Ok(_) => println!("done"),
                 Err(err) => {
                     println!(" error: {}", err);
@@ -301,37 +330,37 @@ fn main() {
             };
         }
         Some(ref cmd) if cmd == "test2" || cmd == "test" => {
-            match peripheral.read_number(CMD_TEST, 2) {
+            match domo.read_number(CMD_TEST, 2) {
                 Ok(val) => println!("test 2: {:04x}", val),
                 Err(err) => println!("test 2: error: {}", err),
             };
         }
         Some(ref cmd) if cmd == "test4" => {
-            match peripheral.read_number(CMD_TEST, 4) {
+            match domo.read_number(CMD_TEST, 4) {
                 Ok(val) => println!("test 4: {:08x}", val),
                 Err(err) => println!("test 4: error: {}", err),
             };
         }
         Some(ref cmd) if cmd == "temp" || cmd == "temp-avg" => {
-            match peripheral.read_number(CMD_TEMP_AVG, 2) {
+            match domo.read_number(CMD_TEMP_AVG, 2) {
                 Ok(val) => println!("temp avg: {:.2}°C", decode_temp(val)),
                 Err(err) => println!("temp avg: error: {}", err),
             };
         }
         Some(ref cmd) if cmd == "temp-now" => {
-            match peripheral.read_number(CMD_TEMP_NOW, 2) {
+            match domo.read_number(CMD_TEMP_NOW, 2) {
                 Ok(val) => println!("temp now: {:.2}°C", decode_temp(val)),
                 Err(err) => println!("temp now: error: {}", err),
             };
         }
         Some(ref cmd) if cmd == "temp-rsum" => {
-            match Domo::new(peripheral).read_temp_rsum() {
+            match domo.read_temp_rsum() {
                 Ok(val) => println!("temp rsum: {:.2}°C", val),
                 Err(err) => println!("temp rsum: error: {}", err),
             };
         }
         Some(ref cmd) if cmd == "temp-raw" => {
-            match Domo::new(peripheral).read_temp_raw() {
+            match domo.read_temp_raw() {
                 Ok(val) => println!("temp raw: {:.2}°C", val),
                 Err(err) => println!("temp raw: error: {}", err),
             };
@@ -339,13 +368,13 @@ fn main() {
         Some(ref cmd) if cmd == "color" => {
             match param {
                 Some(param) => {
-                    match peripheral.write_number(CMD_COLOR, 4, param) {
+                    match domo.write_number(CMD_COLOR, 4, param) {
                         Ok(_) => {}
                         Err(err) => println!("ERROR writing color: {}", err),
                     };
                 }
                 None => {
-                    match peripheral.read_number(CMD_COLOR, 4) {
+                    match domo.read_number(CMD_COLOR, 4) {
                         Ok(val) => println!("color: {:08x}: {:?}", val, Color::from_raw(val)),
                         Err(err) => println!("color: error: {}", err),
                     };
@@ -356,7 +385,7 @@ fn main() {
             println!("unknown command: {}", cmd);
         }
         None => {
-            mainloop(peripheral);
+            mainloop(domo);
         }
     }
 }
