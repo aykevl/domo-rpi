@@ -1,5 +1,5 @@
 
-use std::{env, fs, process, thread, time};
+use std::{env, fs, io, process, thread, time};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Sender, Receiver};
 
@@ -26,28 +26,6 @@ const SPIDEV_PATH: &'static str = "/dev/spidev0.0";
 const COLOR_READ_TIMEOUT: u64 = 5; // 5 seconds
 
 
-fn raw_to_celsius(value: u32, bits: u32) -> f64 {
-    // Source: https://learn.adafruit.com/thermistor/using-a-thermistor
-    // TODO: these constants should be read from the microcontroller
-    let b_coefficient: f64 = 3950.0;  // β-coefficient
-    let t0: f64 = 298.15;  // nominal temperature (25°C)
-    let r0: f64 = 10000.0; // 10kΩ at 25°C
-    let series_resistor: f64 = 10000.0; // 10kΩ series resistor
-
-    // convert value to range 0..1, where 0.5 means t=t0
-    let fvalue: f64 = value as f64 / (1 << bits) as f64;
-
-    // calculate resistance for NTC
-    let r = series_resistor / (1.0 / fvalue - 1.0);
-
-    // Steinhart-Hart equation
-    let tinv = (1.0 / t0) + 1.0 / b_coefficient * (r / r0).ln();
-    let t = 1.0 / tinv;
-
-    // convert from K to °C and return
-    t - 273.15
-}
-
 fn decode_temp(value: u32) -> f64 {
     // Value holds temperature in centidegrees, where 0 equals -55°C.
     // Convert this value to regular °C readings.
@@ -57,6 +35,86 @@ fn decode_temp(value: u32) -> f64 {
 struct Domo {
     peripheral: Peripheral,
     color: Color,
+    temp_b_coefficient: Option<f64>,
+    temp_nominal_r: Option<f64>,
+    temp_series_resistor: Option<f64>,
+}
+
+impl Domo {
+    fn new(peripheral: Peripheral) -> Self {
+        Domo {
+            peripheral: peripheral,
+            color: Color::new(),
+            temp_b_coefficient: None,
+            temp_nominal_r: None,
+            temp_series_resistor: None,
+        }
+    }
+
+    fn read_temp_raw(&mut self) -> Result<f64, io::Error> {
+        let raw_value = try!(self.peripheral.read_number(CMD_TEMP_RAW, 4));
+        self.raw_to_celsius(raw_value, 10)
+    }
+
+    fn read_temp_rsum(&mut self) -> Result<f64, io::Error> {
+        let raw_value = try!(self.peripheral.read_number(CMD_TEMP_RSUM, 4));
+        self.raw_to_celsius(raw_value, 18)
+    }
+
+    fn get_temp_b_coefficient(&mut self) -> Result<f64, io::Error> {
+        Ok(match self.temp_b_coefficient {
+            Some(val) => val,
+            None => {
+                let b_coefficient = try!(self.peripheral.read_number(CMD_TEMP_BCOE, 2)) as f64;
+                self.temp_b_coefficient = Some(b_coefficient);
+                b_coefficient // return
+            }
+        })
+    }
+
+    fn get_temp_nominal_r(&mut self) -> Result<f64, io::Error> {
+        Ok(match self.temp_nominal_r {
+            Some(val) => val,
+            None => {
+                let nominal_r = try!(self.peripheral.read_number(CMD_TEMP_NRES, 2)) as f64;
+                self.temp_nominal_r = Some(nominal_r);
+                nominal_r // return
+            }
+        })
+    }
+
+    fn get_temp_series_resistor(&mut self) -> Result<f64, io::Error> {
+        Ok(match self.temp_series_resistor {
+            Some(val) => val,
+            None => {
+                let series_resistor = try!(self.peripheral.read_number(CMD_TEMP_SRES, 2)) as f64;
+                self.temp_nominal_r = Some(series_resistor);
+                series_resistor // return
+            }
+        })
+    }
+
+    fn raw_to_celsius(&mut self, value: u32, bits: u32) -> Result<f64, io::Error> {
+        // Source: https://learn.adafruit.com/thermistor/using-a-thermistor
+        // TODO: these constants should be read from the microcontroller
+        let b_coefficient = try!(self.get_temp_b_coefficient());
+        let t0: f64 = 298.15;  // nominal temperature (25°C)
+        let r0: f64 = try!(self.get_temp_nominal_r()); // 10kΩ at 25°C
+        let series_resistor: f64 = try!(self.get_temp_series_resistor()); // 10kΩ series resistor
+
+        // convert value to range 0..1, where 0.5 means t=t0
+        let fvalue: f64 = value as f64 / (1 << bits) as f64;
+
+        // calculate resistance for NTC
+        let r = series_resistor / (1.0 / fvalue - 1.0);
+
+        // Steinhart-Hart equation
+        let tinv = (1.0 / t0) + 1.0 / b_coefficient * (r / r0).ln();
+        let t = 1.0 / tinv;
+
+        // convert from K to °C and return
+        Ok(t - 273.15)
+    }
 }
 
 fn log(domo: Arc<Mutex<Domo>>, tx_msg_to_server: Option<Arc<Mutex<Sender<String>>>>) {
@@ -185,10 +243,7 @@ fn mainloop(peripheral: Peripheral) {
         socket::Socket::connect(config, SERVER_URL, rx_msg_to_server, tx_msg_from_server);
     });
 
-    let domo = Arc::new(Mutex::new(Domo {
-        peripheral: peripheral,
-        color: Color::new(),
-    }));
+    let domo = Arc::new(Mutex::new(Domo::new(peripheral)));
 
     let tx_msg_to_server_clone = tx_msg_to_server.clone();
     let domo_clone = domo.clone();
@@ -269,9 +324,15 @@ fn main() {
                 Err(err) => println!("temp now: error: {}", err),
             };
         }
+        Some(ref cmd) if cmd == "temp-rsum" => {
+            match Domo::new(peripheral).read_temp_rsum() {
+                Ok(val) => println!("temp rsum: {:.2}°C", val),
+                Err(err) => println!("temp rsum: error: {}", err),
+            };
+        }
         Some(ref cmd) if cmd == "temp-raw" => {
-            match peripheral.read_number(CMD_TEMP_RAW, 2) {
-                Ok(val) => println!("temp raw: {} ({:.2}°C)", val, raw_to_celsius(val, 10)),
+            match Domo::new(peripheral).read_temp_raw() {
+                Ok(val) => println!("temp raw: {:.2}°C", val),
                 Err(err) => println!("temp raw: error: {}", err),
             };
         }

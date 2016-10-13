@@ -12,10 +12,14 @@ const TYPE_GETTER4: u8 = 0b01000000;
 const TYPE_SETTER2: u8 = 0b10000000;
 const TYPE_SETTER4: u8 = 0b11000000;
 
-pub const CMD_TEMP_NOW: u8 = 0x11;
-pub const CMD_TEMP_AVG: u8 = 0x12;
-pub const CMD_TEMP_RAW: u8 = 0x13;
 pub const CMD_COLOR: u8 = 0x05;
+pub const CMD_TEMP_NOW: u8 = 0x11; // current temp (calculated on AVR)
+pub const CMD_TEMP_AVG: u8 = 0x12; // average temp (calculated on AVR)
+pub const CMD_TEMP_RAW: u8 = 0x13; // raw temp sensor reading
+pub const CMD_TEMP_RSUM: u8 = 0x14; // sum of 256 raw temp sensor readings
+pub const CMD_TEMP_SRES: u8 = 0x15; // constant: series resistor
+pub const CMD_TEMP_NRES: u8 = 0x16; // constant: NTC resistor at 25°C
+pub const CMD_TEMP_BCOE: u8 = 0x17; // constant: NTC β-coefficient
 pub const CMD_TEST: u8 = 0x20;
 
 pub struct Peripheral {
